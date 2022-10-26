@@ -4,16 +4,14 @@ seokju Lee
 '''
 
 from __future__ import division
-import sys
-import cv2
-import os
-import numpy as np
+
 import argparse
-from depth_evaluation_utils import *
+
+import cv2
+import numpy as np
 from tqdm import tqdm
 
-from matplotlib import pyplot as plt
-import pdb
+from depth_evaluation_utils import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--kitti_dir", type=str, help='Path to the KITTI dataset directory')
@@ -53,12 +51,12 @@ def main():
         gt_depth = gt_depths[i]
         pred_depth = np.copy(pred_depths[i])
 
-        mask = np.logical_and(gt_depth > args.min_depth, 
+        mask = np.logical_and(gt_depth > args.min_depth,
                               gt_depth < args.max_depth)
         # crop used by Garg ECCV16 to reprocude Eigen NIPS14 results
         # if used on gt_size 370x1224 produces a crop of [-218, -3, 44, 1180]
         gt_height, gt_width = gt_depth.shape
-        crop = np.array([0.40810811 * gt_height,  0.99189189 * gt_height,   
+        crop = np.array([0.40810811 * gt_height,  0.99189189 * gt_height,
                          0.03594771 * gt_width,   0.96405229 * gt_width]).astype(np.int32)
 
         crop_mask = np.zeros(mask.shape)

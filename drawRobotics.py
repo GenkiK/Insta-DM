@@ -11,10 +11,42 @@ class Arrow3D(FancyArrowPatch):
 
     def draw(self, renderer):
         xs3d, ys3d, zs3d = self._verts3d
-        xs, ys, zs = proj3d.proj_transform(xs3d, ys3d, zs3d, renderer.M)
+        xs, ys, zs = proj3d.proj_transform(xs3d, ys3d, zs3d, self.axes.M)
         self.set_positions((xs[0],ys[0]),(xs[1],ys[1]))
         FancyArrowPatch.draw(self, renderer)
 
+    def do_3d_projection(self, renderer=None):
+        xs3d, ys3d, zs3d = self._verts3d
+        xs, ys, zs = proj3d.proj_transform(xs3d, ys3d, zs3d, self.axes.M)
+        self.set_positions((xs[0],ys[0]),(xs[1],ys[1]))
+
+        return np.min(zs)
+
+# class Arrow3D(FancyArrowPatch):
+
+#     def __init__(self, x, y, z, dx, dy, dz, *args, **kwargs):
+#         super().__init__((0, 0), (0, 0), *args, **kwargs)
+#         self._xyz = (x, y, z)
+#         self._dxdydz = (dx, dy, dz)
+
+#     def draw(self, renderer):
+#         x1, y1, z1 = self._xyz
+#         dx, dy, dz = self._dxdydz
+#         x2, y2, z2 = (x1 + dx, y1 + dy, z1 + dz)
+
+#         xs, ys, zs = proj3d.proj_transform((x1, x2), (y1, y2), (z1, z2), self.axes.M)
+#         self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
+#         super().draw(renderer)
+
+#     def do_3d_projection(self, renderer=None):
+#         x1, y1, z1 = self._xyz
+#         dx, dy, dz = self._dxdydz
+#         x2, y2, z2 = (x1 + dx, y1 + dy, z1 + dz)
+
+#         xs, ys, zs = proj3d.proj_transform((x1, x2), (y1, y2), (z1, z2), self.axes.M)
+#         self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
+
+#         return np.min(zs)
 
 def drawVector(fig, pointA, pointB, **kwargs):
 	ms = kwargs.get('mutation_scale', 20)
@@ -30,7 +62,7 @@ def drawVector(fig, pointA, pointB, **kwargs):
 	annotationString = kwargs.get('annotationString', '')
 	lineWidth = kwargs.get('lineWidth', 1)
 	zorder = kwargs.get('zorder', 1)
-	
+
 
 	if (3 <= pointA.size <= 4):
 		xs = [pointA[0], pointB[0]]
@@ -56,8 +88,8 @@ def drawVector(fig, pointA, pointB, **kwargs):
 		fig.plot([xs[1], xs[1]], [ys[1], ys[1]], [0, zs[1]], color=pc, linestyle='--', zorder=zorder)
 
 	if annotationString != '':
-		fig.text(xs[1], ys[1], zs[1], annotationString, size=15, color='k', zorder=zorder) 
-		
+		fig.text(xs[1], ys[1], zs[1], annotationString, size=15, color='k', zorder=zorder)
+
 
 def drawPointWithAxis(fig, *args, **kwargs):
 	ms = kwargs.get('mutation_scale', 20)

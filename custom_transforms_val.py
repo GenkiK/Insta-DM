@@ -1,12 +1,10 @@
 from __future__ import division
-import torch
-import random
-import numpy as np
-from scipy.misc import imresize
-import cv2
 
-from matplotlib import pyplot as plt
-import pdb
+import random
+
+import numpy as np
+import torch
+from PIL import Image
 
 '''Set of tranform random routines that takes list of inputs as arguments,
 in order to have random but coherent transformations.'''
@@ -77,7 +75,7 @@ class RandomScaleCrop(object):
 
         output_intrinsics[0] *= x_scaling
         output_intrinsics[1] *= y_scaling
-        scaled_images = [imresize(im, (scaled_h, scaled_w)) for im in images]
+        scaled_images = [np.array(Image.fromarray(im).resize((scaled_h, scaled_w), resample=2)) for im in images]
 
         offset_y = np.random.randint(scaled_h - in_h + 1)
         offset_x = np.random.randint(scaled_w - in_w + 1)
