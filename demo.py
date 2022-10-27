@@ -6,6 +6,7 @@ RUN SCRIPT:
 ./scripts/run_demo.sh
 """
 import warnings
+from typing import Any
 
 warnings.simplefilter("ignore", UserWarning)
 
@@ -46,7 +47,7 @@ parser.add_argument("--pretrained-disp", dest="pretrained_disp", default=None, m
 parser.add_argument("--pretrained-ego-pose", dest="pretrained_ego_pose", default=None, metavar="PATH", help="path to pre-trained Ego Pose net model")
 parser.add_argument("--pretrained-obj-pose", dest="pretrained_obj_pose", default=None, metavar="PATH", help="path to pre-trained Obj Pose net model")
 parser.add_argument("--mni", default=3, type=int, help="maximum number of instances")
-parser.add_argument("--name", dest="name", type=str, required=True, help="name of the experiment, checkpoints are stored in checpoints/name")
+parser.add_argument("--name", dest="name", type=str, required=True, help="name of the experiment, checkpoints are stored in checkpoints/name")
 parser.add_argument("--save-fig", action="store_true", help="save figures or not")
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -62,12 +63,13 @@ class SequenceFolder:
         flo_dir = [Path(os.path.join(img_dir.parents[1], "flow_f", img_dir.name)), Path(os.path.join(img_dir.parents[1], "flow_b", img_dir.name))]
 
         intrinsics = np.genfromtxt(img_dir / "cam.txt").astype(np.float32).reshape((3, 3))
+        # 画像などのパスのリスト
         imgs = sorted(img_dir.glob("*.jpg"))
         flof = sorted(flo_dir[0].glob("*.flo"))  # 00: src, 01: tgt
         flob = sorted(flo_dir[1].glob("*.flo"))  # 00: tgt, 01: src
         segm = sorted(seg_dir.glob("*.npy"))
 
-        sequence_set = []
+        sequence_dict_lst: list[dict[str, Any]] = []
         for i in range(len(imgs) - 1):
             sample = {
                 "intrinsics": intrinsics,
@@ -78,38 +80,47 @@ class SequenceFolder:
                 "seg0": segm[i],
                 "seg1": segm[i + 1],
             }  # will be processed when getitem() is called
-            sequence_set.append(sample)
-        self.samples = sequence_set
+            sequence_dict_lst.append(sample)
+        # 画像i + 1の深度推定に必要なセット
+        self.samples = sequence_dict_lst
 
     def __getitem__(self, index):
         sample = self.samples[index]
-        img0 = load_as_float(sample["img0"])
-        img1 = load_as_float(sample["img1"])
+        img0 = load_as_float(sample["img0"])  # HWC
+        img1 = load_as_float(sample["img1"])  # HWC
 
+        # unsqueezeすることでCHW->NCHWにしてる(Nはバッチサイズ)
         flof = torch.from_numpy(load_flo_as_float(sample["flof"])).unsqueeze(0)
         flob = torch.from_numpy(load_flo_as_float(sample["flob"])).unsqueeze(0)
 
-        seg0 = torch.from_numpy(load_seg_as_float(sample["seg0"]))
+        seg0 = torch.from_numpy(load_seg_as_float(sample["seg0"]))  # torch.Size([6, 256, 832]) チャネルが各インスタンスに対応している
         seg1 = torch.from_numpy(load_seg_as_float(sample["seg1"]))
-
-        seg0 = seg0[torch.cat([torch.zeros(1).long(), seg0.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)].unsqueeze(0)
+        # seg0の各チャンネルは１つのインスタンスのマスクだが，このマスクのサイズが大きい順に並び替えている.
+        # ただしseg0[0]のマスク領域が0の背景部分(?)は，argsort(descending=True)したときに常に最後尾にくるが，これは先頭に来るように固定している([:-1]で背景部分のインデックスを削除して，torch.cat([torch.zeros(1).long(), ...]))で先頭に持ってきている．
+        # longはなんかそうしないとTorchに怒られるから(tensors used as indices must be long, byte or bool tensors)
+        # 背景はReIDするときに必要となる（maxIoUが0のとき，max(match_table)したときのIndexが0となる．index 0は背景のIndex）
+        seg0 = seg0[torch.cat([torch.zeros(1).long(), seg0.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)].unsqueeze(
+            0
+        )  # torch.Size([1, 6, 256, 832], dtype=torch.float32)
         seg1 = seg1[torch.cat([torch.zeros(1).long(), seg1.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)].unsqueeze(0)
 
         insts0, insts1 = [], []
-        fwd_flows, bwd_flows = [], []
-
+        # TODO: nocとは何？
         noc_f, noc_b = find_noc_masks(flof, flob)
-        seg0w, _ = flow_warp(seg1, flof)
+        seg0w, _ = flow_warp(seg1, flof)  # おそらくseg0w == warped_seg0_from_seg1
         seg1w, _ = flow_warp(seg0, flob)
 
         n_inst0 = seg0.shape[1]
         n_inst1 = seg1.shape[1]
 
         ### Warp seg0 to seg1. Find IoU between seg1w and seg1. Find the maximum corresponded instance in seg1.
+        ### seg0からseg1へワープさせたときのIoUを計算している
         iou_01, ch_01 = inst_iou(seg1w, seg1, valid_mask=noc_b)
         iou_10, ch_10 = inst_iou(seg0w, seg0, valid_mask=noc_f)
 
-        seg0_re = torch.zeros(self.max_num_instances + 1, seg0.shape[2], seg0.shape[3])
+        # 1つのインスタンスにつき，1つのチャネルを作りたい?
+        # 初期化
+        seg0_re = torch.zeros(self.max_num_instances + 1, seg0.shape[2], seg0.shape[3])  # seg.shape[2] == H, seg.shape[3] == W
         seg1_re = torch.zeros(self.max_num_instances + 1, seg1.shape[2], seg1.shape[3])
         non_overlap_0 = torch.ones([seg0.shape[2], seg0.shape[3]])
         non_overlap_1 = torch.ones([seg0.shape[2], seg0.shape[3]])
@@ -129,8 +140,6 @@ class SequenceFolder:
 
         insts0.append(seg0_re.detach().cpu().numpy().transpose(1, 2, 0))
         insts1.append(seg1_re.detach().cpu().numpy().transpose(1, 2, 0))
-        fwd_flows.append(flof[0].detach().cpu().numpy().transpose(1, 2, 0))
-        bwd_flows.append(flob[0].detach().cpu().numpy().transpose(1, 2, 0))
 
         imgs, segs, intrinsics = self.transform([img0, img1], insts0 + insts1, np.copy(sample["intrinsics"]))
 
@@ -152,14 +161,18 @@ def main():
 
     args = parser.parse_args()
     if args.save_fig:
+        # save directory作成
         timestamp = datetime.datetime.now().strftime("%m-%d-%H:%M")
         args.save_path = "outputs" / Path(args.name) / timestamp
         print("=> will save everything to {}".format(args.save_path))
         args.save_path.mkdir(parents=True, exist_ok=True)
-
     print(f"=> fetching scenes in '{args.data}'")
+    # 画像の前処理
     normalize = custom_transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    demo_transform = custom_transforms.Compose([custom_transforms.ArrayToTensor(), normalize])
+    demo_transform = custom_transforms.Compose(
+        [custom_transforms.ArrayToTensor(), normalize]
+    )  # ここで構成したNormalizeとArrayToTensorからなるTransformはSequenceFolderからサンプルを__getitem__()する度に適用する
+    # SequenceFolderはただのDatasetと思えば良い
     demo_set = SequenceFolder(args.data, transform=demo_transform, max_num_instances=args.mni)
     print(f"=> {len(demo_set)} samples found")
     demo_loader = torch.utils.data.DataLoader(demo_set, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
@@ -201,9 +214,11 @@ def main():
 
 @torch.no_grad()
 def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
+    """
+    main()で使用される関数
+    """
     torch.set_printoptions(sci_mode=False)
     np.set_printoptions(suppress=True)
-    # np.set_printoptions(formatter={'all':lambda x: str(x)})
 
     # switch to eval mode
     disp_net.eval().to(device)
@@ -213,7 +228,7 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
     ego_global_mat = np.identity(4)
     ego_global_mats = [ego_global_mat]
 
-    objOs, objHs, objXs, objYs, objZs = [], [], [], [], []
+    objOs, objHs = [], []
     objIDs = []
     colors = ["yellow", "lightskyblue", "lime", "magenta", "orange", "coral", "gold", "cyan"]
 
@@ -292,8 +307,6 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         tgt_depth = 1 / disp_net(tgt_img)
         ego_pose = ego_pose_net(tgt_bg_img, ref_bg_img)
         ego_pose_inv = ego_pose_net(ref_bg_img, tgt_bg_img)
-        # ego_pose = ego_pose_net(tgt_img, ref_img)
-        # ego_pose_inv = ego_pose_net(ref_img, tgt_img)
 
         ego_mat = pose_vec2mat(ego_pose).squeeze(0).cpu().detach().numpy()
         ego_mat = np.concatenate([ego_mat, np.array([0, 0, 0, 1]).reshape(1, 4)], axis=0)
@@ -322,6 +335,7 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         ref_obj_depth = ref_depth.repeat(num_inst, 1, 1, 1) * ref_seg[0, 1 : 1 + num_inst].unsqueeze(1)
         tgt_obj_depth = tgt_depth.repeat(num_inst, 1, 1, 1) * tgt_seg[0, 1 : 1 + num_inst].unsqueeze(1)
 
+        # FIXME: objectが見つからなかったときにエラーが起こる
         _, _, _, _, r2t_obj_imgs, r2t_obj_masks, _, r2t_obj_sc_depths = compute_reverse_warp_ego(
             [ref_depth, ref_depth], [ref_obj_img, ref_obj_img], [ref_obj_mask, ref_obj_mask], [ego_pose_inv, ego_pose_inv], intrinsics, num_insts
         )
@@ -360,7 +374,6 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         rtt_obj_imgs, rtt_obj_masks, rtt_obj_depths, rtt_obj_sc_depths = compute_reverse_warp_obj(
             r2t_obj_sc_depths, r2t_obj_imgs, r2t_obj_masks, [-obj_pose, -obj_pose], intrinsics.repeat(num_inst, 1, 1), num_insts
         )
-        # pdb.set_trace()
         """
             sq = 0; bb = 0;
             plt.close('all')
@@ -376,7 +389,6 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.figure(10); plt.imshow(rtt_obj_imgs[sq][bb,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show()
 
         """
-
         _, _, r2t_ego_projected_depth, r2t_ego_computed_depth = inverse_warp2(ref_img, tgt_depth, ego_pose, intrinsics, ref_depth)
 
         ### KITTI ###
@@ -416,7 +428,6 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         bbox_l = dict(boxstyle="round", facecolor="lime", alpha=0.5)
         bbox_w = dict(boxstyle="round", facecolor="white", alpha=0.5)
         bbox_b = dict(boxstyle="round", facecolor="deepskyblue", alpha=0.5)
-        # pdb.set_trace()
 
         sq = 0
         bb = 0
@@ -1082,7 +1093,7 @@ def load_seg_as_float(path):
 
 def L2_norm(x, dim=1, keepdim=True):
     curr_offset = 1e-10
-    l2_norm = torch.norm(torch.abs(x) + curr_offset, dim=dim, keepdim=True)
+    l2_norm = torch.norm(torch.abs(x) + curr_offset, dim=dim, keepdim=keepdim)
     return l2_norm
 
 
@@ -1097,6 +1108,7 @@ def find_noc_masks(fwd_flow, bwd_flow):
     bwd2fwd_flow, _ = flow_warp(bwd_flow, fwd_flow)
     fwd2bwd_flow, _ = flow_warp(fwd_flow, bwd_flow)
 
+    # これらがOcclusionしてた/することになる領域
     fwd_flow_diff = torch.abs(bwd2fwd_flow + fwd_flow)
     bwd_flow_diff = torch.abs(fwd2bwd_flow + bwd_flow)
 
@@ -1105,14 +1117,14 @@ def find_noc_masks(fwd_flow, bwd_flow):
 
     noc_mask_0 = (L2_norm(fwd_flow_diff) < fwd_consist_bound).type(torch.FloatTensor)  # noc_mask_tgt, torch.Size([1, 1, 256, 832]), torch.float32
     noc_mask_1 = (L2_norm(bwd_flow_diff) < bwd_consist_bound).type(torch.FloatTensor)  # noc_mask_src, torch.Size([1, 1, 256, 832]), torch.float32
-    # pdb.set_trace()
 
     return noc_mask_0, noc_mask_1
 
 
 def inst_iou(seg_src, seg_tgt, valid_mask):
     """
-    -> seg_src의 인스턴스들이 seg_tgt의 몇 번째 채널 인스턴스에 매칭되는가?
+    srcの各インスタンスにつき，tgtの全てのインスタンスとIoUを計算していく
+    -> Which instance of seg_tgt matches instances of seg_src?
 
     seg_src: torch.Size([1, n_inst, 256, 832])
     seg_tgt:  torch.Size([1, n_inst, 256, 832])
@@ -1123,27 +1135,25 @@ def inst_iou(seg_src, seg_tgt, valid_mask):
 
     seg_src_m = seg_src * valid_mask.repeat(1, n_inst_src, 1, 1)
     seg_tgt_m = seg_tgt * valid_mask.repeat(1, n_inst_tgt, 1, 1)
-    # pdb.set_trace()
-    """
-    plt.figure(1), plt.imshow(seg_src.sum(dim=0).sum(dim=0)), plt.colorbar(), plt.ion(), plt.show()
-    plt.figure(2), plt.imshow(seg_tgt.sum(dim=0).sum(dim=0)),  plt.colorbar(), plt.ion(), plt.show()
-    plt.figure(3), plt.imshow(valid_mask[0,0]),  plt.colorbar(), plt.ion(), plt.show()
-    plt.figure(4), plt.imshow(seg_src_m.sum(dim=0).sum(dim=0)),  plt.colorbar(), plt.ion(), plt.show()
-    """
+    # plt.figure(1), plt.imshow(seg_src.sum(dim=0).sum(dim=0)), plt.colorbar(), plt.ion(), plt.show(), breakpoint()
+    # plt.figure(2), plt.imshow(seg_tgt.sum(dim=0).sum(dim=0)), plt.colorbar(), plt.ion(), plt.show(), breakpoint()
+    # plt.figure(3), plt.imshow(valid_mask[0, 0]), plt.colorbar(), plt.ion(), plt.show(), breakpoint()
+    # plt.figure(4), plt.imshow(seg_src_m.sum(dim=0).sum(dim=0)), plt.colorbar(), plt.ion(), plt.show(), breakpoint()
     for i in range(n_inst_src):
-        if i == 0:
+        if i == 0:  # background
             match_table = torch.from_numpy(np.zeros([1, n_inst_tgt]).astype(np.float32))
             continue
 
-        overl = (seg_src_m[:, i].unsqueeze(1).repeat(1, n_inst_tgt, 1, 1) * seg_tgt_m).clamp(min=0, max=1).squeeze(0).sum(1).sum(1)
-        union = (seg_src_m[:, i].unsqueeze(1).repeat(1, n_inst_tgt, 1, 1) + seg_tgt_m).clamp(min=0, max=1).squeeze(0).sum(1).sum(1)
-
-        iou_inst = overl / union
+        # iou_inst: torch.Size([n_tgt_inst])
+        overlap = (
+            (seg_src_m[:, i].unsqueeze(1).repeat(1, n_inst_tgt, 1, 1) * seg_tgt_m).clamp(min=0, max=1).squeeze(0).sum(dim=(1, 2))
+        )  # H,Wで合計してIoU面積を出す
+        union = (seg_src_m[:, i].unsqueeze(1).repeat(1, n_inst_tgt, 1, 1) + seg_tgt_m).clamp(min=0, max=1).squeeze(0).sum(dim=(1, 2))
+        iou_inst = overlap / union
         match_table = torch.cat((match_table, iou_inst.unsqueeze(0)), dim=0)
-
-    iou, inst_idx = torch.max(match_table, dim=1)
-    # pdb.set_trace()
-
+    # ここでは各srcインスタンスから見て最大のIoUを取るオブジェクトを同じオブジェクトとして計算してしまっているから，1つのtgtに対して複数のsrcが対応付けられてしまっている．
+    # ただしこの問題はinst_iou()を呼び出す側で処理しているから大丈夫
+    iou, inst_idx = torch.max(match_table, dim=1)  # 全組み合わせを見てから最大のIoUを取ったもの同士に同じIDを与える
     return iou, inst_idx
 
 

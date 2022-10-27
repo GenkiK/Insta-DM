@@ -1,6 +1,9 @@
 outputs/
 kitti_256/
 pretrained/
+*.code-workspace
+memo*
+.vscode/
 
 ################ python ###############
 # Byte-compiled / optimized / DLL files

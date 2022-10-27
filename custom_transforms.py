@@ -1,9 +1,9 @@
-'''
+"""
 Seokju Lee
 
 # (+) customized inputs: images (src/tgt), segmentation mask (src/tgt), intrinsics
 
-'''
+"""
 from __future__ import division
 
 import random
@@ -13,8 +13,8 @@ import numpy as np
 import torch
 from PIL import Image
 
-'''Set of tranform random routines that takes list of inputs as arguments,
-in order to have random but coherent transformations.'''
+"""Set of transform random routines that takes list of inputs as arguments,
+in order to have random but coherent transformations."""
 
 
 class Compose(object):
@@ -22,8 +22,8 @@ class Compose(object):
         self.transforms = transforms
 
     def __call__(self, images, segms, intrinsics):
-        for t in self.transforms:
-            images, segms, intrinsics = t(images, segms, intrinsics)
+        for transform in self.transforms:
+            images, segms, intrinsics = transform(images, segms, intrinsics)
         return images, segms, intrinsics
 
 
@@ -46,8 +46,8 @@ class ArrayToTensor(object):
         img_tensors = []
         seg_tensors = []
         for im in images:
-            im = np.transpose(im, (2, 0, 1))                        # put it from HWC to CHW format
-            img_tensors.append(torch.from_numpy(im).float()/255)    # handle numpy array
+            im = np.transpose(im, (2, 0, 1))  # put it from HWC to CHW format
+            img_tensors.append(torch.from_numpy(im).float() / 255)  # handle numpy array
         for im in segms:
             im = np.transpose(im, (2, 0, 1))
             seg_tensors.append(torch.from_numpy(im).float())
@@ -65,7 +65,7 @@ class RandomHorizontalFlip(object):
             output_segms = [np.copy(np.fliplr(im)) for im in segms]
 
             w = output_images[0].shape[1]
-            output_intrinsics[0,2] = w - output_intrinsics[0,2]
+            output_intrinsics[0, 2] = w - output_intrinsics[0, 2]
         else:
             output_images = images
             output_segms = segms
@@ -88,14 +88,16 @@ class RandomScaleCrop(object):
         output_intrinsics[1] *= y_scaling
 
         scaled_images = [np.array(Image.fromarray(im).resize((scaled_h, scaled_w), resample=2)) for im in images]
-        scaled_segms = [cv2.resize(im, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST) for im in segms]      # 이 부분에서 1채널 세그먼트 [256 x 832 x 1] >> [256 x 832]로 변환됨!
+        scaled_segms = [
+            cv2.resize(im, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST) for im in segms
+        ]  # 이 부분에서 1채널 세그먼트 [256 x 832 x 1] >> [256 x 832]로 변환됨!
 
         offset_y = np.random.randint(scaled_h - in_h + 1)
         offset_x = np.random.randint(scaled_w - in_w + 1)
-        cropped_images = [im[offset_y:offset_y + in_h, offset_x:offset_x + in_w] for im in scaled_images]
-        cropped_segms = [im[offset_y:offset_y + in_h, offset_x:offset_x + in_w] for im in scaled_segms]
+        cropped_images = [im[offset_y : offset_y + in_h, offset_x : offset_x + in_w] for im in scaled_images]
+        cropped_segms = [im[offset_y : offset_y + in_h, offset_x : offset_x + in_w] for im in scaled_segms]
 
-        output_intrinsics[0,2] -= offset_x
-        output_intrinsics[1,2] -= offset_y
+        output_intrinsics[0, 2] -= offset_x
+        output_intrinsics[1, 2] -= offset_y
 
         return cropped_images, cropped_segms, output_intrinsics

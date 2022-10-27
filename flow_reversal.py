@@ -91,18 +91,10 @@ class FlowReversal(nn.Module):
         ids_mask = torch.masked_select(ids, mask).clone().cuda()
 
         # Note here! accmulate fla must be true for proper bp
-        img_warp = torch.zeros(
-            [
-                N * C * H * W,
-            ]
-        ).cuda()
+        img_warp = torch.zeros([N * C * H * W]).cuda()
         img_warp.put_(ids_mask, torch.masked_select(flat_img * flat_weight, mask), accumulate=True)
 
-        one_warp = torch.zeros(
-            [
-                N * C * H * W,
-            ]
-        ).cuda()
+        one_warp = torch.zeros([N * C * H * W]).cuda()
         one_warp.put_(ids_mask, torch.masked_select(flat_weight, mask), accumulate=True)
 
         return img_warp.view(N, C, H, W), one_warp.view(N, C, H, W)
