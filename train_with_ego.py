@@ -1,5 +1,4 @@
 """
-Seokju Lee
 PyTorch version 1.4.0, 1.7.0 confirmed
 
 RUN SCRIPT:
@@ -8,16 +7,13 @@ RUN SCRIPT:
 
 """
 
-import warnings
-
-warnings.simplefilter("ignore", UserWarning)
-
 import argparse
 import csv
 import datetime
 import os
 import pdb
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -38,15 +34,18 @@ from loss_functions import (
     compute_obj_size_constraint_loss,
     compute_photo_and_geometry_loss,
     compute_smooth_loss,
+    ego_pose_loss,
 )
 from rigid_warp import forward_warp
 from utils import save_checkpoint
+
+# TODO: 推論時はこのサイトの形式で出力するhttps://github.com/Huangying-Zhan/kitti-odom-eval
 
 parser = argparse.ArgumentParser(
     description="Learning Monocular Depth in Dynamic Scenes via Instance-Aware Projection Consistency (KITTI and CityScapes)",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-parser.add_argument("data", metavar="DIR", help="path to dataset")
+parser.add_argument("data-dir", metavar="DIR", type=Path, help="path to dataset", default="")
 parser.add_argument(
     "--with-gt",
     action="store_true",
@@ -84,11 +83,8 @@ parser.add_argument("--weight-decay", "--wd", default=0, type=float, metavar="W"
 parser.add_argument("--print-freq", default=10, type=int, metavar="N", help="print frequency")
 parser.add_argument("--save-freq", default=3, type=int, metavar="N", help="save frequency")
 parser.add_argument("--resnet-layers", type=int, default=18, choices=[18, 50], help="number of ResNet layers for depth estimation.")
-parser.add_argument("--with-pretrain", type=int, default=1, help="with or without imagenet pretrain for resnet")
+parser.add_argument("--with-pretrained", type=int, default=1, help="with or without imagenet pretrained for resnet")
 parser.add_argument("--resnet-pretrained", action="store_true", help="pretrained from resnet model or not")
-# parser.add_argument("--pretrained-disp", dest="pretrained_disp", default=None, metavar="PATH", help="path to pre-trained DispResNet")
-# parser.add_argument("--pretrained-ego-pose", dest="pretrained_ego_pose", default=None, metavar="PATH", help="path to pre-trained EgoPoseNet")
-# parser.add_argument("--pretrained-obj-pose", dest="pretrained_obj_pose", default=None, metavar="PATH", help="path to pre-trained ObjPoseNet")
 parser.add_argument("--seed", default=0, type=int, help="seed for random functions, and network initialization")
 parser.add_argument("--log-summary", default="progress_log_summary.csv", metavar="PATH", help="csv where to save per-epoch train and valid stats")
 parser.add_argument("--log-full", default="progress_log_full.csv", metavar="PATH", help="csv where to save per-gradient descent train stats")
@@ -97,16 +93,18 @@ parser.add_argument("-p", "--photo-loss-weight", type=float, help="weight for ph
 parser.add_argument("-c", "--geometry-consistency-weight", type=float, help="weight for depth consistency loss", metavar="W", default=1.0)
 parser.add_argument("-s", "--smooth-loss-weight", type=float, help="weight for disparity smoothness loss", metavar="W", default=0.1)
 parser.add_argument("-o", "--scale-loss-weight", type=float, help="weight for object scale loss", metavar="W", default=0.02)
-parser.add_argument("-mc", "--mof-consistency-loss-weight", type=float, help="weight for mof consistency loss", metavar="W", default=0.1)
+parser.add_argument(
+    "-mc", "--mof-consistency-loss-weight", type=float, help="weight for mof consistency loss", metavar="W", default=0.1
+)  # mofって何？photometric lossのうち，SSIMについてる定数項？
 parser.add_argument("-hp", "--height-loss-weight", type=float, help="weight for height prior loss", metavar="W", default=0.0)
-parser.add_argument("-dm", "--depth-loss-weight", type=float, help="weight for depth mean loss", metavar="W", default=0.0)
+parser.add_argument("-dm", "--depth-loss-weight", type=float, help="weight for depth mean loss", metavar="W", default=0.0)  # HACK: これなんのためにある？
 
 parser.add_argument("--with-auto-mask", action="store_true", help="with the the mask for stationary points")
 parser.add_argument("--with-ssim", action="store_true", help="with ssim or not")
 parser.add_argument("--with-mask", action="store_true", help="with the the mask for moving objects and occlusions or not")
 parser.add_argument("--with-only-obj", action="store_true", help="with only obj mask")
 
-parser.add_argument("--name", dest="name", type=str, required=True, help="name of the experiment, checkpoints are stored in checpoints/name")
+parser.add_argument("--name", dest="name", type=str, required=True, help="name of the experiment, checkpoints are stored in checkpoints/name")
 parser.add_argument("--debug-mode", action="store_true", help="run codes with debugging mode or not")
 parser.add_argument("--no-shuffle", action="store_true", help="feed data without shuffling")
 parser.add_argument("--no-input-aug", action="store_true", help="feed data without augmentation")
@@ -122,7 +120,6 @@ device_val = torch.device("cuda:1") if torch.cuda.is_available() else torch.devi
 def main():
     print("=> PyTorch version: " + torch.__version__ + " || CUDA_VISIBLE_DEVICES: " + os.environ["CUDA_VISIBLE_DEVICES"])
 
-    global best_error, n_iter, device
     args = parser.parse_args()
 
     timestamp = datetime.datetime.now().strftime("%m-%d-%H:%M")
@@ -148,10 +145,10 @@ def main():
     else:
         valid_transform = custom_transforms.Compose([custom_transforms.ArrayToTensor(), normalize])
 
-    print("=> fetching scenes from '{}'".format(args.data))
+    print("=> fetching scenes from '{}'".format(args.data_dir))
     train_set = SequenceFolder(
-        root=args.data,
-        train=True,
+        root_dir=args.data_dir,
+        is_train=True,
         seed=args.seed,
         shuffle=not (args.no_shuffle),
         max_num_instances=args.mni,
@@ -160,14 +157,15 @@ def main():
     )
 
     # if no GT is available (e.g., Cityscapes), Validation set is the same type as training set to measure photometric loss from warping
-    if args.with_gt:
+    # GTがあればGTを使ってValidationデータを評価するが，なければ自己教師での損失でValidationを評価する
+    if args.with_gt:  # TODO: validation foldersを整備する必要あり
         from datasets.validation_folders import ValidationSet
 
-        val_set = ValidationSet(root=args.data, transform=valid_transform)
+        val_set = ValidationSet(root=args.data_dir, transform=valid_transform)
     else:
         val_set = SequenceFolder(
-            root=args.data,
-            train=False,
+            root_dir=args.data_dir,
+            is_train=False,
             seed=args.seed,
             shuffle=not (args.no_shuffle),
             max_num_instances=args.mni,
@@ -188,33 +186,13 @@ def main():
     # create model
     print("=> creating model")
 
-    disp_net = models.DispResNet(args.resnet_layers, args.with_pretrain).to(device)
-    ego_pose_net = models.EgoPoseNet(18, args.with_pretrain).to(device)
-    obj_pose_net = models.ObjPoseNet(18, args.with_pretrain).to(device)
+    disp_net = models.DispResNet(args.resnet_layers, args.with_pretrained).to(device)
+    ego_pose_net = models.EgoPoseNet(18, args.with_pretrained).to(device)
+    obj_pose_net = models.ObjPoseNet(18, args.with_pretrained).to(device)
 
-    if args.pretrained_ego_pose:
-        print("=> using pre-trained weights for EgoPoseNet")
-        weights = torch.load(args.pretrained_ego_pose)
-        ego_pose_net.load_state_dict(weights["state_dict"], strict=False)
-    else:
-        ego_pose_net.init_weights()
-
-    if args.pretrained_obj_pose:
-        print("=> using pre-trained weights for ObjPoseNet")
-        weights = torch.load(args.pretrained_obj_pose)
-        obj_pose_net.load_state_dict(weights["state_dict"], strict=False)
-    else:
-        obj_pose_net.init_weights()
-
-    if args.pretrained_disp:
-        print("=> using pre-trained weights for DispNet")
-        weights = torch.load(args.pretrained_disp)
-        if args.resnet_pretrained:
-            disp_net.load_state_dict(weights, strict=False)
-        else:
-            disp_net.load_state_dict(weights["state_dict"], strict=False)
-    else:
-        disp_net.init_weights()
+    ego_pose_net.init_weights()
+    obj_pose_net.init_weights()
+    disp_net.init_weights()
 
     cudnn.benchmark = True
     disp_net = torch.nn.DataParallel(disp_net)
@@ -247,19 +225,6 @@ def main():
 
     logger = TermLogger(n_epochs=args.epochs, train_size=min(len(train_loader), args.epoch_size), valid_size=len(val_loader))
     logger.epoch_bar.start()
-
-    ### validation at the beginning ###
-    if not args.debug_mode:
-        if args.pretrained_disp:
-            logger.reset_valid_bar()
-            if args.with_gt:
-                errors, error_names = validate_with_gt(args, val_loader, disp_net, 0, logger)
-            else:
-                errors, error_names = validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 0, logger)
-            for error, name in zip(errors, error_names):
-                tf_writer.add_scalar(name, error, 0)
-            error_string = ", ".join("{} : {:.3f}".format(name, error) for name, error in zip(error_names, errors))
-            logger.valid_writer.write(" * Avg {}".format(error_string))
 
     for epoch in range(args.epochs):
         logger.epoch_bar.update(epoch)
@@ -308,7 +273,7 @@ def main():
 
 
 def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, epoch_size, logger, tf_writer):
-    global n_iter, device
+    global n_iter
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter(precision=4)
@@ -318,6 +283,14 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     w1, w2, w3 = args.photo_loss_weight, args.geometry_consistency_weight, args.smooth_loss_weight
     w4, w5, w6 = args.scale_loss_weight, args.mof_consistency_loss_weight, args.height_loss_weight
     w7 = args.depth_loss_weight
+    # loss_1: photometric (eq.17)
+    # loss_2: geometric (eq.18)
+    # loss_3: smooth (eq.19)
+    # loss_4: height loss (eq. 21)
+    # loss_5: translation constraint (eq. 20)
+    # loss_6: x
+    # loss_7: x
+    # TODO: Ego-motionについての教師の重みを定義する（とりあえず１でいいかも）
 
     # switch to train mode
     disp_net.train().to(device)
@@ -327,39 +300,45 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     end = time.time()
     logger.train_bar.update(0)
 
-    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts) in enumerate(train_loader):
+    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts, gt_poses) in enumerate(train_loader):
         if args.debug_mode and i > 5:
             break
-        # if i > 5: break;
 
         log_losses = i > 0 and n_iter % args.print_freq == 0
 
         ### inputs to GPU ###
         data_time.update(time.time() - end)
         tgt_img = tgt_img.to(device)
-        ref_imgs = [img.to(device) for img in ref_imgs]
+        ref_imgs = [ref_img.to(device) for ref_img in ref_imgs]
         intrinsics = intrinsics.to(device)
         intrinsics_inv = intrinsics_inv.to(device)
-        tgt_insts = [img.to(device) for img in tgt_insts]
-        ref_insts = [img.to(device) for img in ref_insts]
+        tgt_insts = [tgt_inst.to(device) for tgt_inst in tgt_insts]
+        ref_insts = [ref_inst.to(device) for ref_inst in ref_insts]  # ref_insts[i] == ref_imgs[i]とtgt_imgと比較したときにassociationできたref_imgs[i]内のインスタンスたち
 
         ### input instance masking ###
-        tgt_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in tgt_insts]
-        ref_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in ref_insts]
+        tgt_bg_masks = [
+            1 - (inst_img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for inst_img in tgt_insts
+        ]  # inst_img: torch.Size([max_num_insts, H, W])
+        ref_bg_masks = [1 - (inst_img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for inst_img in ref_insts]
         tgt_bg_imgs = [tgt_img * tgt_mask * ref_mask for tgt_mask, ref_mask in zip(tgt_bg_masks, ref_bg_masks)]
         ref_bg_imgs = [ref_img * tgt_mask * ref_mask for ref_img, tgt_mask, ref_mask in zip(ref_imgs, tgt_bg_masks, ref_bg_masks)]
         tgt_obj_masks = [1 - mask for mask in tgt_bg_masks]
         ref_obj_masks = [1 - mask for mask in ref_bg_masks]
         num_insts = [tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts]  # Number of instances for each sequence
 
-        ### object height piror ###
+        ### object height prior ###
         height_prior = disp_net.module.obj_height_prior
 
         ### compute depth & ego-motion ###
         tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
-        ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(ego_pose_net, tgt_bg_imgs, ref_bg_imgs)  # [ 2 x ([B, 6]) ]
+        # TODO: 以下のPoseを教師と比較．compute_ego_pose_with_inv()の中でLossも計算する
+        # ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(ego_pose_net, tgt_bg_imgs, ref_bg_imgs)  # [ 2 x ([B, 6]) ]
+        # TODO: tgt_bg_imgsは本当に複数枚あるのか検証する.そしてego_pose_fwd_lossesは本当に複数ある？
+        ego_poses_fwd, ego_poses_bwd, ego_pose_fwd_losses, ego_pose_bwd_losses = compute_ego_pose_with_inv_and_loss(
+            ego_pose_net, tgt_bg_imgs, ref_bg_imgs
+        )  # [ 2 x ([B, 6]) ]
 
-        ### Remove ego-motion effct: transformation with ego-motion ###
+        ### Remove ego-motion effect: transformation with ego-motion ###
         ### NumRefs(2) >> Nx(C+mni)xHxW,  {t-1}->{t} | {t+1}->{t} ###
         r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics)
         ### NumRefs(2) >> Nx(C+mni)xHxW,  {t}->{t-1} | {t}->{t+1} ###
@@ -442,8 +421,6 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
             r2t_vals_ego,
             t2r_vals_ego,
         )
-        # pdb.set_trace() # BREAKPOINT-2
-        # continue;
         """ ### dpoint ###
             sq = 0; bb = 0;
             colormap = 'turbo'  # turbo, plasma
@@ -556,13 +533,24 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
             )
 
         ### Compute height prior constraint loss ###
+        # 学習には使ってない．height-priorをTensorboardで見たかっただけ？
         loss_6 = height_prior
 
         ### Compute depth mean constraint loss ###
+        # 学習には使ってない．これもTensorboardで見たかっただけ？
         loss_7 = ((1 / tgt_depth).mean() + sum([(1 / depth).mean() for depth in ref_depths])) / (1 + len(ref_depths))
 
-        loss = w1 * loss_1 + w2 * loss_2 + w3 * loss_3 + w4 * loss_4 + w5 * loss_5 + w6 * loss_6 + w7 * loss_7
-        # pdb.set_trace()
+        loss = (
+            w1 * loss_1
+            + w2 * loss_2
+            + w3 * loss_3
+            + w4 * loss_4
+            + w5 * loss_5
+            + w6 * loss_6
+            + w7 * loss_7
+            + ego_pose_fwd_losses
+            + ego_pose_bwd_losses
+        )
         """
             loss_1.item(), loss_2.item(), loss_3.item(), loss_4.item(), loss_5.item()
             w1*loss_1.item(), w2*loss_2.item(), w3*loss_3.item(), w4*loss_4.item(), w5*loss_5.item()
@@ -632,11 +620,9 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
     end = time.time()
     logger.valid_bar.update(0)
 
-    # for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv) in enumerate(val_loader):
     for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts) in enumerate(val_loader):
         if args.debug_mode and i > 5:
             break
-        # if i > 5: break;
 
         ### inputs to GPU ###
         tgt_img = tgt_img.to(device)
@@ -659,7 +645,7 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
         tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
         ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(ego_pose_net, tgt_bg_imgs, ref_bg_imgs)  # [ 2 x ([B, 6]) ]
 
-        ### Remove ego-motion effct: transformation with ego-motion ###
+        ### Remove ego-motion effect: transformation with ego-motion ###
         r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics)
         t2r_imgs_ego, t2r_insts_ego, t2r_depths_ego, t2r_vals_ego = compute_ego_warp(
             [tgt_img, tgt_img], tgt_insts, [tgt_depth, tgt_depth], ego_poses_fwd, intrinsics
@@ -703,7 +689,6 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
             r2t_vals_ego,
             t2r_vals_ego,
         )
-        # pdb.set_trace()
 
         ### Compute depth smoothness loss ###
         loss_3 = compute_smooth_loss(tgt_depth, tgt_img, ref_depths, ref_imgs)
@@ -728,7 +713,7 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
 
 @torch.no_grad()
 def validate_with_gt(args, val_loader, disp_net, epoch, logger):
-    global device_val
+    # TODO: Ego-motionのPathを追加
     batch_time = AverageMeter()
     error_names = ["abs_diff", "abs_rel", "sq_rel", "a1", "a2", "a3"]
     errors = AverageMeter(i=len(error_names))
@@ -745,15 +730,12 @@ def validate_with_gt(args, val_loader, disp_net, epoch, logger):
     for i, (tgt_img, depth, tgt_inst_sum) in enumerate(val_loader):
         if args.debug_mode and i > 5:
             break
-        # if i > 5: break;
-
         tgt_img = tgt_img.to(device_val)  # B, 3, 256, 832
         depth = depth.to(device_val)
         tgt_inst_sum = tgt_inst_sum.to(device_val)
 
         vmask = (depth > 0).float()
         fg_pixs = vmask * tgt_inst_sum
-        bg_pixs = vmask * (1 - tgt_inst_sum)
         fg_ratio = (fg_pixs.sum(dim=1).sum(dim=1) / vmask.sum(dim=1).sum(dim=1)).mean()
         depth_fg = depth * tgt_inst_sum
         depth_bg = depth * (1 - tgt_inst_sum)
@@ -768,7 +750,6 @@ def validate_with_gt(args, val_loader, disp_net, epoch, logger):
         errors_bg.update(compute_errors(depth_bg, output_depth, med_scale)[0])
         if fg_ratio:
             errors_fg.update(compute_errors(depth_fg, output_depth, med_scale)[0])
-        # pdb.set_trace()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -802,6 +783,26 @@ def compute_ego_pose_with_inv(pose_net, tgt_imgs, ref_imgs):
         poses_bwd.append(pose_net(ref_img, tgt_img))
 
     return poses_fwd, poses_bwd
+
+
+def compute_ego_pose_with_inv_and_loss(pose_net, tgt_imgs, ref_imgs, gt_poses):
+    poses_fwd = []
+    poses_bwd = []
+    losses_fwd = []
+    losses_bwd = []
+    # gt_pose: [r11, r12, r13, t1, r21, r22, t2, r31, r32, r33, t3]
+    gt_pose_mat = gt_pose.view(3, 4)
+    gt_translation_vec = gt_pose[:, 3]
+    gt_rot_mat = gt_pose_mat[:, :3]
+
+    for tgt_img, ref_img, gt_pose in zip(tgt_imgs, ref_imgs, gt_poses):
+        fwd_pose = pose_net(tgt_img, ref_img)
+        bwd_pose = pose_net(ref_img, tgt_img)
+        poses_fwd.append(fwd_pose)
+        poses_bwd.append(bwd_pose)
+        losses_fwd.append(ego_pose_loss(fwd_pose, gt_rot_mat, gt_translation_vec))
+        losses_bwd.append(ego_pose_loss(bwd_pose, gt_rot_mat.T, -gt_translation_vec @ gt_rot_mat))  # -(R.T @ t).T == -t.T @ R, t.Tは横ベクトル
+    return poses_fwd, poses_bwd, losses_fwd, losses_bwd
 
 
 def compute_ego_warp(imgs, insts, depths, poses, intrinsics, is_detach=True):
@@ -888,7 +889,6 @@ def compute_obj_pose_with_inv(pose_net, tgtI, tgtMs, r2tIs, r2tMs, refIs, refMs,
             pose_bwd = pose_net(refO, t2rO)
             obj_pose_fwd[fwdIdx] = pose_fwd
             obj_pose_bwd[bwdIdx] = pose_bwd
-            # pdb.set_trace()
 
         obj_poses_fwd.append(obj_pose_fwd.reshape(bs, mni, 3))
         obj_poses_bwd.append(obj_pose_bwd.reshape(bs, mni, 3))

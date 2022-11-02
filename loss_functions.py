@@ -1,22 +1,22 @@
-'''
-Seokju Lee
-
-'''
-
 from __future__ import division
+
+import numpy as np
 import torch
 from torch import nn
-import torch.nn.functional as F
-from rigid_warp import inverse_warp_mof, pose_mof2mat, flow_warp
-import math
-import random
-import numpy as np
-from matplotlib import pyplot as plt
-import pdb
+
+from rigid_warp import euler2mat, flow_warp, inverse_warp_mof, pose_mof2mat
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-
+# TODO: 回転行列の掛け算が単位行列になるという制約を追加する
+def ego_pose_loss(pred_pose: torch.Tensor, gt_rot_mat: torch.Tensor, gt_translation_vec: torch.Tensor) -> torch.Tensor:
+    # pred_pose: [t1, t2, t3, r1, r2, r3]
+    # gt_translation_vec: [t1, t2, t3]
+    rotation_loss = torch.square(euler2mat(pred_pose[:, 3:]) - gt_rot_mat).sum(dim=(0,1)) # 回転行列の各要素ごとにL2 norm
+    translation_loss = torch.norm(gt_translation_vec - pred_pose[:3]) # 並進ベクトルのL1 norm
+    cos_sim = nn.CosineSimilarity(dim=0) # 並進方向へのロス
+    direction_loss = cos_sim(gt_translation_vec,  pred_pose[:3])
+    return translation_loss + rotation_loss + direction_loss
 
 class SSIM(nn.Module):
     '''
@@ -92,9 +92,8 @@ def compute_photo_and_geometry_loss(tgt_img, ref_imgs, intrinsics, tgt_depth, re
 
 
 def compute_pairwise_loss(tgt_img, ref_img, tgt_depth, ref_depth, motion_field, intrinsic, with_ssim, with_mask, with_auto_mask, padding_mode, with_only_obj, obj_mask, vmask):
-
     ref_img_warped, valid_mask, projected_depth, computed_depth, r2t_flow = inverse_warp_mof(ref_img, tgt_depth, ref_depth, motion_field, intrinsic, padding_mode)
-    
+
     diff_img = (tgt_img - ref_img_warped).abs().clamp(0, 1)
     diff_depth = ((computed_depth - projected_depth).abs() / (computed_depth + projected_depth)).clamp(0, 1)
 
@@ -173,7 +172,7 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
     for tgtM, refD, refM, num_inst in zip(tgtMs, refDs, refMs, num_insts):
         if sum(num_inst) != 0:
             fy_rep = intrinsics[:,1,1].repeat_interleave(mni, dim=0)
-            
+
             ### tgt-frame ###
             tgtD_rep = tgtD.repeat_interleave(mni, dim=0)
             tgtD_avg = tgtD_rep.mean(dim=[1,2,3])
@@ -183,16 +182,15 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
             tgtH_obj = torch.tensor([ tgtM_idx[2][tgtM_idx[0]==obj].max() - tgtM_idx[2][tgtM_idx[0]==obj].min() if (tgtM_idx[0]==obj).sum()!=0 else 0 for obj in range(tgtM_rep.size(0)) ]).type_as(tgtD)
 
             tgt_val = (tgtD_obj > 0) * (tgtH_obj > 0)
-            
+
             tgt_fy = fy_rep[tgt_val]
             tgtD_avg = tgtD_avg[tgt_val].detach()   # d_avg.detach() to prevent increasing depth in the sky.
-            # tgtD_avg = tgtD_avg[tgt_val]
             tgtD_obj = tgtD_obj[tgt_val]
             tgtH_obj = tgtH_obj[tgt_val]
             tgtD_app = (tgt_fy * height_prior) / tgtH_obj
 
             loss_tgt = torch.abs( (tgtD_obj-tgtD_app)/tgtD_avg ).sum() / torch.abs( (tgtD_obj-tgtD_app)/tgtD_avg ).size(0)
-            
+
 
             ### ref-frame ###
             refD_rep = refD.repeat_interleave(mni, dim=0)
@@ -203,10 +201,9 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
             refH_obj = torch.tensor([ refM_idx[2][refM_idx[0]==obj].max() - refM_idx[2][refM_idx[0]==obj].min() if (refM_idx[0]==obj).sum()!=0 else 0 for obj in range(refM_rep.size(0)) ]).type_as(refD)
 
             ref_val = (refD_obj > 0) * (refH_obj > 0)
-            
+
             ref_fy = fy_rep[ref_val]
             refD_avg = refD_avg[ref_val].detach()   # d_avg.detach() to prevent increasing depth in the sky.
-            # refD_avg = refD_avg[ref_val]
             refD_obj = refD_obj[ref_val]
             refH_obj = refH_obj[ref_val]
             refD_app = (ref_fy * height_prior) / refH_obj
@@ -232,7 +229,7 @@ def compute_mof_consistency_loss(tgt_mofs, ref_mofs, r2t_flows, t2r_flows, r2t_d
     '''
     bs, _, hh, ww = tgt_mofs[0].size()
     eye = torch.eye(3).reshape(1,1,3,3).repeat(bs,hh*ww,1,1).type_as(tgt_mofs[0])
-    
+
     loss = torch.tensor(.0).cuda()
 
     for enum, (tgt_mof, ref_mof, r2t_flow, t2r_flow, r2t_diff, t2r_diff, r2t_val, t2r_val) in \
@@ -240,7 +237,7 @@ def compute_mof_consistency_loss(tgt_mofs, ref_mofs, r2t_flows, t2r_flows, r2t_d
 
         tgt_mat = pose_mof2mat(tgt_mof)
         ref_mat = pose_mof2mat(ref_mof)
-        
+
         ### rotation error ###
         tgt_rot = tgt_mat[:,:,:3].reshape(bs,3,3,-1).permute(0,3,1,2)
         ref_rot = ref_mat[:,:,:3].reshape(bs,3,3,-1).permute(0,3,1,2)
@@ -269,9 +266,6 @@ def compute_mof_consistency_loss(tgt_mofs, ref_mofs, r2t_flows, t2r_flows, r2t_d
         cost_t = mean_on_mask( trans_err, r2t_mask )
 
         loss += cost_r + alpha*cost_t
-        # pdb.set_trace()
-
-    # pdb.set_trace()
     '''
         r2t_mof, r2t_val0 = flow_warp(ref_mof, r2t_flow)
         t2r_mof, t2r_val0 = flow_warp(tgt_mof, t2r_flow)
@@ -318,7 +312,7 @@ def mean_on_mask(diff, valid_mask):
         return torch.tensor(.0).cuda()
     else:
         return (diff * mask).sum() / mask.sum()
-        
+
 
 
 @torch.no_grad()
@@ -346,7 +340,7 @@ def compute_errors(gt, pred, med_scale=None):
 
         if med_scale is None:
             med_scale = torch.median(valid_gt) / torch.median(valid_pred)
-        
+
         valid_pred = valid_pred * med_scale
 
         thresh = torch.max((valid_gt / valid_pred), (valid_pred / valid_gt))

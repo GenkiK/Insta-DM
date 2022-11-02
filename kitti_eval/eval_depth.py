@@ -1,8 +1,3 @@
-'''
-seokju Lee
-
-'''
-
 from __future__ import division
 
 import argparse
@@ -74,4 +69,5 @@ def main():
     print("{:>10}, {:>10}, {:>10}, {:>10}, {:>10}, {:>10}, {:>10}".format('abs_rel', 'sq_rel', 'rms', 'log_rms', 'a1', 'a2', 'a3'))
     print("{:10.4f}, {:10.4f}, {:10.4f}, {:10.4f}, {:10.4f}, {:10.4f}, {:10.4f}".format(abs_rel.mean(), sq_rel.mean(), rms.mean(), log_rms.mean(), a1.mean(), a2.mean(), a3.mean()))
 
-main()
+if __name__ == "__main__":
+    main()

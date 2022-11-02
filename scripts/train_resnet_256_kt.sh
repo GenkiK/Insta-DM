@@ -1,21 +1,17 @@
-### Seokju Lee
 ############################################################################################################
-
 
 ### Dataset directory ###
-TRAIN_SET=/seokju/KITTI/kitti_256
-
+TRAIN_DIR = ../kitt_256
 
 ### KITTI model ###
-PRETRAINED=checkpoints/models-release/KITTI
-# PRETRAINED=checkpoints/models-release/CS+KITTI
-
+# PRETRAINED=checkpoints/models-release/KITTI
+# TrainなのにPretrainedを使う...?
+PRETRAINED=pretrained/KITTI
 
 ############################################################################################################
 
-
 ### For training ###
-CUDA_VISIBLE_DEVICES=0,1 python train.py $TRAIN_SET \
+CUDA_VISIBLE_DEVICES=0,1 python train.py $TRAIN_DIR \
 --pretrained-disp $PRETRAINED/resnet18_disp_kt.tar \
 --pretrained-ego-pose $PRETRAINED/resnet18_ego_kt.tar \
 --pretrained-obj-pose $PRETRAINED/resnet18_obj_kt.tar \
@@ -24,7 +20,6 @@ CUDA_VISIBLE_DEVICES=0,1 python train.py $TRAIN_SET \
 --with-ssim --with-mask --with-auto-mask \
 --with-gt \
 --name insta_dm_kt \
-
 
 # ### For debugging ###
 # CUDA_VISIBLE_DEVICES=2,3 python train.py $TRAIN_SET \

@@ -1,16 +1,9 @@
-'''
-Seokju Lee
-
-'''
-
 from __future__ import absolute_import, division, print_function
+
 import torch
 import torch.nn as nn
-from collections import OrderedDict
-from .resnet_encoder import *
-import numpy as np
-import pdb
 
+from .resnet_encoder import *
 
 
 class PoseDecoder(nn.Module):

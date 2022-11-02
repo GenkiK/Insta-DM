@@ -16,7 +16,6 @@ Max Planck Institute for Intelligent Systems, Tuebingen, Germany
 
 # Requirements: Numpy as PIL/Pillow
 import numpy as np
-from PIL import Image
 
 # Check for endianness, based on Daniel Scharstein's optical flow code.
 # Using little-endian architecture, these two should be equal.
@@ -24,8 +23,8 @@ TAG_FLOAT = 202021.25
 TAG_CHAR = 'PIEH'
 
 def flow_read(filename):
-    """ Read optical flow from file, return (U,V) tuple. 
-    
+    """ Read optical flow from file, return (U,V) tuple.
+
     Original code by Deqing Sun, adapted from Daniel Scharstein.
     """
     f = open(filename,'rb')
@@ -42,7 +41,7 @@ def flow_read(filename):
 
 def flow_write(filename,uv,v=None):
     """ Write optical flow to file.
-    
+
     If v is None, uv is assumed to contain both u and v channels,
     stacked in depth.
 

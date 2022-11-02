@@ -1,6 +1,7 @@
-from blessings import Terminal
-import progressbar
 import sys
+
+import progressbar
+from blessings import Terminal
 
 
 class TermLogger(object):
@@ -15,7 +16,7 @@ class TermLogger(object):
         ts = 6  # valid bar position
         value = self.t.height
         h = int(0 if value is None else value)
-        
+
         for i in range(10):
             print('')
         self.epoch_bar = progressbar.ProgressBar(max_value=n_epochs, fd=Writer(self.t, (0, h-s+e)))

@@ -1,6 +1,4 @@
 """
-Seokju Lee
-
 # (+) customized inputs: images (src/tgt), segmentation mask (src/tgt), intrinsics
 
 """
@@ -33,9 +31,9 @@ class Normalize(object):
         self.std = std
 
     def __call__(self, images, segms, intrinsics):
-        for tensor in images:
-            for t, m, s in zip(tensor, self.mean, self.std):
-                t.sub_(m).div_(s)
+        for image in images:
+            for img_ch, mean_ch, std_ch in zip(image, self.mean, self.std):
+                img_ch.sub_(mean_ch).div_(std_ch)
         return images, segms, intrinsics
 
 
@@ -45,12 +43,12 @@ class ArrayToTensor(object):
     def __call__(self, images, segms, intrinsics):
         img_tensors = []
         seg_tensors = []
-        for im in images:
-            im = np.transpose(im, (2, 0, 1))  # put it from HWC to CHW format
-            img_tensors.append(torch.from_numpy(im).float() / 255)  # handle numpy array
-        for im in segms:
-            im = np.transpose(im, (2, 0, 1))
-            seg_tensors.append(torch.from_numpy(im).float())
+        for img in images:
+            img = np.transpose(img, (2, 0, 1))  # put it from HWC to CHW format
+            img_tensors.append(torch.from_numpy(img).float() / 255)  # handle numpy array
+        for segm in segms:
+            segm = np.transpose(segm, (2, 0, 1))
+            seg_tensors.append(torch.from_numpy(segm).float())
         return img_tensors, seg_tensors, intrinsics
 
 
@@ -58,11 +56,10 @@ class RandomHorizontalFlip(object):
     """Randomly horizontally flips the given numpy array with a probability of 0.5"""
 
     def __call__(self, images, segms, intrinsics):
-        assert intrinsics is not None
         if random.random() < 0.5:
             output_intrinsics = np.copy(intrinsics)
-            output_images = [np.copy(np.fliplr(im)) for im in images]
-            output_segms = [np.copy(np.fliplr(im)) for im in segms]
+            output_images = [np.copy(np.fliplr(img)) for img in images]
+            output_segms = [np.copy(np.fliplr(segm)) for segm in segms]
 
             w = output_images[0].shape[1]
             output_intrinsics[0, 2] = w - output_intrinsics[0, 2]
@@ -77,25 +74,24 @@ class RandomScaleCrop(object):
     """Randomly zooms images up to 15% and crop them to keep same size as before."""
 
     def __call__(self, images, segms, intrinsics):
-        assert intrinsics is not None
         output_intrinsics = np.copy(intrinsics)
 
-        in_h, in_w, _ = images[0].shape
+        h, w, _ = images[0].shape
         x_scaling, y_scaling = np.random.uniform(1, 1.15, 2)
-        scaled_h, scaled_w = int(in_h * y_scaling), int(in_w * x_scaling)
+        scaled_h, scaled_w = int(h * y_scaling), int(w * x_scaling)
 
         output_intrinsics[0] *= x_scaling
         output_intrinsics[1] *= y_scaling
 
-        scaled_images = [np.array(Image.fromarray(im).resize((scaled_h, scaled_w), resample=2)) for im in images]
+        scaled_images = [np.array(Image.fromarray(img).resize((scaled_h, scaled_w), resample=2)) for img in images]
         scaled_segms = [
-            cv2.resize(im, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST) for im in segms
+            cv2.resize(segm, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST) for segm in segms
         ]  # 이 부분에서 1채널 세그먼트 [256 x 832 x 1] >> [256 x 832]로 변환됨!
 
-        offset_y = np.random.randint(scaled_h - in_h + 1)
-        offset_x = np.random.randint(scaled_w - in_w + 1)
-        cropped_images = [im[offset_y : offset_y + in_h, offset_x : offset_x + in_w] for im in scaled_images]
-        cropped_segms = [im[offset_y : offset_y + in_h, offset_x : offset_x + in_w] for im in scaled_segms]
+        offset_y = np.random.randint(scaled_h - h + 1)
+        offset_x = np.random.randint(scaled_w - w + 1)
+        cropped_images = [img[offset_y : offset_y + h, offset_x : offset_x + w] for img in scaled_images]
+        cropped_segms = [segm[offset_y : offset_y + h, offset_x : offset_x + w] for segm in scaled_segms]
 
         output_intrinsics[0, 2] -= offset_x
         output_intrinsics[1, 2] -= offset_y
