@@ -13,6 +13,7 @@ import datetime
 import os
 import pdb
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +25,6 @@ from matplotlib import pyplot as plt
 from tensorboardX import SummaryWriter
 
 import custom_transforms
-import custom_transforms_val
 import models
 from datasets.sequence_folders import SequenceFolder
 from logger import AverageMeter, TermLogger
@@ -39,18 +39,20 @@ from loss_functions import (
 from rigid_warp import forward_warp
 from utils import save_checkpoint
 
+warnings.simplefilter("ignore", UserWarning)
+
 # TODO: 推論時はこのサイトの形式で出力するhttps://github.com/Huangying-Zhan/kitti-odom-eval
 
 parser = argparse.ArgumentParser(
     description="Learning Monocular Depth in Dynamic Scenes via Instance-Aware Projection Consistency (KITTI and CityScapes)",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-parser.add_argument("data-dir", metavar="DIR", type=Path, help="path to dataset", default="")
-parser.add_argument(
-    "--with-gt",
-    action="store_true",
-    help="use ground truth for validation. You need to store it in npy 2D arrays see data/kitti_raw_loader.py for an example",
-)
+parser.add_argument("data_dir", metavar="DIR", type=Path, help="path to dataset", default="")
+# parser.add_argument(
+#     "--with-gt",
+#     action="store_true",
+#     help="use ground truth for validation. You need to store it in npy 2D arrays see data/kitti_raw_loader.py for an example",
+# )
 parser.add_argument("--sequence-length", type=int, metavar="N", help="sequence length for training", default=3)
 parser.add_argument("-mni", type=int, help="maximum number of instances", default=20)
 parser.add_argument(
@@ -70,6 +72,7 @@ parser.add_argument(
     " border will only null gradients of the coordinate outside (x or y)",
 )
 
+# TODO: num_workersを変更する
 parser.add_argument("-j", "--workers", default=8, type=int, metavar="N", help="number of data loading workers")
 parser.add_argument("-b", "--batch-size", default=4, type=int, metavar="N", help="mini-batch size")
 parser.add_argument("--epochs", default=200, type=int, metavar="N", help="number of total epochs to run")
@@ -104,7 +107,9 @@ parser.add_argument("--with-ssim", action="store_true", help="with ssim or not")
 parser.add_argument("--with-mask", action="store_true", help="with the the mask for moving objects and occlusions or not")
 parser.add_argument("--with-only-obj", action="store_true", help="with only obj mask")
 
-parser.add_argument("--name", dest="name", type=str, required=True, help="name of the experiment, checkpoints are stored in checkpoints/name")
+parser.add_argument(
+    "--dest-dir", dest="dest_dir", type=Path, required=True, help="name of the experiment, checkpoints are stored in checkpoints/dest_dir"
+)
 parser.add_argument("--debug-mode", action="store_true", help="run codes with debugging mode or not")
 parser.add_argument("--no-shuffle", action="store_true", help="feed data without shuffling")
 parser.add_argument("--no-input-aug", action="store_true", help="feed data without augmentation")
@@ -126,24 +131,20 @@ def main():
     if args.debug_mode:
         args.save_path = "checkpoints" / Path("debug") / timestamp
     else:
-        args.save_path = "checkpoints" / Path(args.name) / timestamp
+        args.save_path = "checkpoints" / args.dest_dir / timestamp
     print("=> will save everything to {}".format(args.save_path))
-    args.save_path.makedirs_p()
+    args.save_path.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
 
     tf_writer = SummaryWriter(args.save_path)
 
     # Data loading
     normalize = custom_transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    normalize_val = custom_transforms_val.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 
     train_transform = custom_transforms.Compose(
         [custom_transforms.RandomHorizontalFlip(), custom_transforms.RandomScaleCrop(), custom_transforms.ArrayToTensor(), normalize]
     )
-    if args.with_gt:
-        valid_transform = custom_transforms_val.Compose([custom_transforms_val.ArrayToTensor(), normalize_val])
-    else:
-        valid_transform = custom_transforms.Compose([custom_transforms.ArrayToTensor(), normalize])
+    valid_transform = custom_transforms.Compose([custom_transforms.ArrayToTensor(), normalize])
 
     print("=> fetching scenes from '{}'".format(args.data_dir))
     train_set = SequenceFolder(
@@ -152,27 +153,20 @@ def main():
         seed=args.seed,
         shuffle=not (args.no_shuffle),
         max_num_instances=args.mni,
-        sequence_length=args.sequence_length,
         transform=train_transform,
     )
 
     # if no GT is available (e.g., Cityscapes), Validation set is the same type as training set to measure photometric loss from warping
     # GTがあればGTを使ってValidationデータを評価するが，なければ自己教師での損失でValidationを評価する
-    if args.with_gt:  # TODO: validation foldersを整備する必要あり
-        from datasets.validation_folders import ValidationSet
-
-        val_set = ValidationSet(root=args.data_dir, transform=valid_transform)
-    else:
-        val_set = SequenceFolder(
-            root_dir=args.data_dir,
-            is_train=False,
-            seed=args.seed,
-            shuffle=not (args.no_shuffle),
-            max_num_instances=args.mni,
-            sequence_length=args.sequence_length,
-            transform=valid_transform,
-            proportion=0.1,
-        )
+    val_set = SequenceFolder(
+        root_dir=args.data_dir,
+        is_train=False,
+        seed=args.seed,
+        shuffle=not (args.no_shuffle),
+        max_num_instances=args.mni,
+        transform=valid_transform,
+        proportion=0.1,
+    )
     print("=> {} samples found in training set || {} samples found in validation set".format(len(train_set), len(val_set)))
 
     train_loader = torch.utils.data.DataLoader(
@@ -236,10 +230,7 @@ def main():
 
         ### evaluate on validation set ###
         logger.reset_valid_bar()
-        if args.with_gt:
-            errors, error_names = validate_with_gt(args, val_loader, disp_net, epoch, logger)
-        else:
-            errors, error_names = validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, epoch, logger)
+        errors, error_names = validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, logger)
         error_string = ", ".join("{} : {:.3f}".format(name, error) for name, error in zip(error_names, errors))
         logger.valid_writer.write(" * Avg {}".format(error_string))
 
@@ -250,6 +241,7 @@ def main():
 
         # Up to you to chose the most relevant error to measure your model's performance, careful some measures are to maximize (such as a1,a2,a3)
         decisive_error = errors[1]  # "errors[1]" or "train_loss"
+        global best_error
         if best_error < 0:
             best_error = decisive_error
 
@@ -290,7 +282,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     # loss_5: translation constraint (eq. 20)
     # loss_6: x
     # loss_7: x
-    # TODO: Ego-motionについての教師の重みを定義する（とりあえず１でいいかも）
+    # HACK: Ego-motionについての教師の重みを定義する（とりあえず１でいいかも）
 
     # switch to train mode
     disp_net.train().to(device)
@@ -300,7 +292,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     end = time.time()
     logger.train_bar.update(0)
 
-    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts, gt_poses) in enumerate(train_loader):
+    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts, gt_rel_poses) in enumerate(train_loader):
         if args.debug_mode and i > 5:
             break
 
@@ -314,6 +306,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         intrinsics_inv = intrinsics_inv.to(device)
         tgt_insts = [tgt_inst.to(device) for tgt_inst in tgt_insts]
         ref_insts = [ref_inst.to(device) for ref_inst in ref_insts]  # ref_insts[i] == ref_imgs[i]とtgt_imgと比較したときにassociationできたref_imgs[i]内のインスタンスたち
+        gt_rel_poses = [pose.to(device) for pose in gt_rel_poses]
 
         ### input instance masking ###
         tgt_bg_masks = [
@@ -331,11 +324,8 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
 
         ### compute depth & ego-motion ###
         tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
-        # TODO: 以下のPoseを教師と比較．compute_ego_pose_with_inv()の中でLossも計算する
-        # ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(ego_pose_net, tgt_bg_imgs, ref_bg_imgs)  # [ 2 x ([B, 6]) ]
-        # TODO: tgt_bg_imgsは本当に複数枚あるのか検証する.そしてego_pose_fwd_lossesは本当に複数ある？
-        ego_poses_fwd, ego_poses_bwd, ego_pose_fwd_losses, ego_pose_bwd_losses = compute_ego_pose_with_inv_and_loss(
-            ego_pose_net, tgt_bg_imgs, ref_bg_imgs
+        ego_poses_fwd, ego_poses_bwd, ego_pose_loss = compute_ego_pose_with_inv_and_loss(
+            ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_rel_poses
         )  # [ 2 x ([B, 6]) ]
 
         ### Remove ego-motion effect: transformation with ego-motion ###
@@ -380,7 +370,6 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
             fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t_d_prev_err, vmax=0.5, vmin=-0.5); plt.colorbar(); plt.text(10, -14, "r2t_d_prev_err", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
             fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t_d_next_err, vmax=0.5, vmin=-0.5); plt.colorbar(); plt.text(10, -14, "r2t_d_next_err", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
             plt.tight_layout(); plt.ion(); plt.show()
-
         """
 
         ### Compute object motion ###
@@ -421,7 +410,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
             r2t_vals_ego,
             t2r_vals_ego,
         )
-        """ ### dpoint ###
+        """
             sq = 0; bb = 0;
             colormap = 'turbo'  # turbo, plasma
             mmax = +0.01; mmin = -0.01;
@@ -540,17 +529,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         # 学習には使ってない．これもTensorboardで見たかっただけ？
         loss_7 = ((1 / tgt_depth).mean() + sum([(1 / depth).mean() for depth in ref_depths])) / (1 + len(ref_depths))
 
-        loss = (
-            w1 * loss_1
-            + w2 * loss_2
-            + w3 * loss_3
-            + w4 * loss_4
-            + w5 * loss_5
-            + w6 * loss_6
-            + w7 * loss_7
-            + ego_pose_fwd_losses
-            + ego_pose_bwd_losses
-        )
+        loss = w1 * loss_1 + w2 * loss_2 + w3 * loss_3 + w4 * loss_4 + w5 * loss_5 + w6 * loss_6 + w7 * loss_7 + ego_pose_loss
         """
             loss_1.item(), loss_2.item(), loss_3.item(), loss_4.item(), loss_5.item()
             w1*loss_1.item(), w2*loss_2.item(), w3*loss_3.item(), w4*loss_4.item(), w5*loss_5.item()
@@ -605,10 +584,120 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
 
 
 @torch.no_grad()
+def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, logger):
+    batch_time = AverageMeter()
+    losses_meter = AverageMeter(n_meters=5, precision=4)
+
+    w1, w2, w3 = args.photo_loss_weight, args.geometry_consistency_weight, args.smooth_loss_weight
+    # HACK: その他のロスは不要？ w4, w5 = args.scale_loss_weight, args.mof_consistency_loss_weight
+
+    # switch to evaluation mode
+    disp_net.eval()
+    ego_pose_net.eval()
+    obj_pose_net.eval()
+
+    end = time.time()
+    logger.valid_bar.update(0)
+
+    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts, gt_rel_poses) in enumerate(val_loader):
+        if args.debug_mode and i > 5:
+            break
+
+        ### inputs to GPU ###
+        tgt_img = tgt_img.to(device)
+        ref_imgs = [img.to(device) for img in ref_imgs]
+        intrinsics = intrinsics.to(device)
+        intrinsics_inv = intrinsics_inv.to(device)
+        tgt_insts = [img.to(device) for img in tgt_insts]
+        ref_insts = [img.to(device) for img in ref_insts]
+        gt_rel_poses = [pose.to(device) for pose in gt_rel_poses]
+
+        ### input instance masking ###
+        tgt_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in tgt_insts]
+        ref_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in ref_insts]
+        tgt_bg_imgs = [tgt_img * tgt_mask * ref_mask for tgt_mask, ref_mask in zip(tgt_bg_masks, ref_bg_masks)]
+        ref_bg_imgs = [ref_img * tgt_mask * ref_mask for ref_img, tgt_mask, ref_mask in zip(ref_imgs, tgt_bg_masks, ref_bg_masks)]
+        tgt_obj_masks = [1 - mask for mask in tgt_bg_masks]
+        ref_obj_masks = [1 - mask for mask in ref_bg_masks]
+        num_insts = [tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts]  # Number of instances for each sequence
+
+        ### compute depth & ego-motion ###
+        tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
+        # ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(ego_pose_net, tgt_bg_imgs, ref_bg_imgs)  # [ 2 x ([B, 6]) ]
+        ego_poses_fwd, ego_poses_bwd, ego_pose_loss = compute_ego_pose_with_inv_and_loss(ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_rel_poses)
+
+        ### Remove ego-motion effect: transformation with ego-motion ###
+        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics)
+        t2r_imgs_ego, t2r_insts_ego, t2r_depths_ego, t2r_vals_ego = compute_ego_warp(
+            [tgt_img, tgt_img], tgt_insts, [tgt_depth, tgt_depth], ego_poses_fwd, intrinsics
+        )
+
+        ### Compute object motion ###
+        obj_poses_fwd, obj_poses_bwd = compute_obj_pose_with_inv(
+            obj_pose_net,
+            tgt_img,
+            tgt_insts,
+            r2t_imgs_ego,
+            r2t_insts_ego,
+            ref_imgs,
+            ref_insts,
+            t2r_imgs_ego,
+            t2r_insts_ego,
+            intrinsics,
+            args.mni,
+            num_insts,
+        )
+
+        ### Compute composite motion field ###
+        tot_mofs_fwd, tot_mofs_bwd = compute_motion_field(tgt_img, ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts)
+
+        ### Compute unified projection loss ###
+        loss_1, loss_2, _, _, _, _, _, _, _, _ = compute_photo_and_geometry_loss(
+            tgt_img,
+            ref_imgs,
+            intrinsics,
+            tgt_depth,
+            ref_depths,
+            tot_mofs_fwd,
+            tot_mofs_bwd,
+            args.with_ssim,
+            args.with_mask,
+            args.with_auto_mask,
+            args.padding_mode,
+            args.with_only_obj,
+            tgt_obj_masks,
+            ref_obj_masks,
+            r2t_vals_ego,
+            t2r_vals_ego,
+        )
+
+        ### Compute depth smoothness loss ###
+        loss_3 = compute_smooth_loss(tgt_depth, tgt_img, ref_depths, ref_imgs)
+
+        loss_1 = loss_1.item()
+        loss_2 = loss_2.item()
+        loss_3 = loss_3.item()
+        ego_pose_loss = ego_pose_loss.item()
+
+        loss = w1 * loss_1 + w2 * loss_2 + w3 * loss_3 + ego_pose_loss
+        losses_meter.update([loss, loss_1, loss_2, loss_3, ego_pose_loss])
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+        logger.valid_bar.update(i + 1)
+        if i % args.print_freq == 0:
+            logger.valid_writer.write("valid: Time {} Loss {}".format(batch_time, losses_meter))
+
+    logger.valid_bar.update(len(val_loader))
+    return losses_meter.avg, ["Total loss", "Photo loss", "Geometry loss", "Smooth loss", "Ego-pose loss"]
+
+
+@torch.no_grad()
 def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, epoch, logger):
     global device
     batch_time = AverageMeter()
-    losses = AverageMeter(i=4, precision=4)
+    losses = AverageMeter(n_meters=4, precision=4)
 
     w1, w2, w3 = args.photo_loss_weight, args.geometry_consistency_weight, args.smooth_loss_weight
 
@@ -713,12 +802,12 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
 
 @torch.no_grad()
 def validate_with_gt(args, val_loader, disp_net, epoch, logger):
-    # TODO: Ego-motionのPathを追加
     batch_time = AverageMeter()
     error_names = ["abs_diff", "abs_rel", "sq_rel", "a1", "a2", "a3"]
-    errors = AverageMeter(i=len(error_names))
-    errors_fg = AverageMeter(i=len(error_names))
-    errors_bg = AverageMeter(i=len(error_names))
+    errors = AverageMeter(n_meters=len(error_names))
+    errors_fg = AverageMeter(n_meters=len(error_names))
+    errors_bg = AverageMeter(n_meters=len(error_names))
+    # TODO: poseも追加する
 
     # switch to evaluate mode
     disp_net = disp_net.module.to(device_val)
@@ -785,24 +874,28 @@ def compute_ego_pose_with_inv(pose_net, tgt_imgs, ref_imgs):
     return poses_fwd, poses_bwd
 
 
-def compute_ego_pose_with_inv_and_loss(pose_net, tgt_imgs, ref_imgs, gt_poses):
+def compute_ego_pose_with_inv_and_loss(pose_net, tgt_imgs, ref_imgs, seq_rel_poses):
     poses_fwd = []
     poses_bwd = []
-    losses_fwd = []
-    losses_bwd = []
-    # gt_pose: [r11, r12, r13, t1, r21, r22, t2, r31, r32, r33, t3]
-    gt_pose_mat = gt_pose.view(3, 4)
-    gt_translation_vec = gt_pose[:, 3]
-    gt_rot_mat = gt_pose_mat[:, :3]
+    pose_loss = 0.0
 
-    for tgt_img, ref_img, gt_pose in zip(tgt_imgs, ref_imgs, gt_poses):
+    # tgt_imgs: [(4,3,256,832), (4,3,256,832)]
+
+    for tgt_img, ref_img, batch_rel_poses in zip(tgt_imgs, ref_imgs, seq_rel_poses):
+        # gt_pose: [r11, r12, r13, t1, r21, r22, t2, r31, r32, r33, t3].view(3, 4)
+        gt_translation_vecs = batch_rel_poses[:, :, 3]
+        gt_rot_mats = batch_rel_poses[:, :, :3]
+
         fwd_pose = pose_net(tgt_img, ref_img)
         bwd_pose = pose_net(ref_img, tgt_img)
         poses_fwd.append(fwd_pose)
         poses_bwd.append(bwd_pose)
-        losses_fwd.append(ego_pose_loss(fwd_pose, gt_rot_mat, gt_translation_vec))
-        losses_bwd.append(ego_pose_loss(bwd_pose, gt_rot_mat.T, -gt_translation_vec @ gt_rot_mat))  # -(R.T @ t).T == -t.T @ R, t.Tは横ベクトル
-    return poses_fwd, poses_bwd, losses_fwd, losses_bwd
+        pose_loss += ego_pose_loss(fwd_pose, gt_rot_mats, gt_translation_vecs)
+
+        ## -(R.T @ t).T == -t.T @ R, t.Tは横ベクトル
+        # pose_loss += ego_pose_loss(bwd_pose, gt_rot_mats.T, -gt_translation_vecs @ gt_rot_mats)
+        pose_loss += ego_pose_loss(bwd_pose, gt_rot_mats.transpose(1, 2), -gt_translation_vecs @ gt_rot_mats)
+    return poses_fwd, poses_bwd, pose_loss
 
 
 def compute_ego_warp(imgs, insts, depths, poses, intrinsics, is_detach=True):

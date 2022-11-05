@@ -1,21 +1,16 @@
-'''
-Seokju Lee
-
-'''
-
 from __future__ import absolute_import, division, print_function
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .resnet_encoder import *
-import numpy as np
-import pdb
 
+from .resnet_encoder import ResnetEncoder
 
 
 class ConvBlock(nn.Module):
-    """Layer to perform a convolution followed by ELU
-    """
+    """Layer to perform a convolution followed by ELU"""
+
     def __init__(self, in_channels, out_channels):
         super(ConvBlock, self).__init__()
 
@@ -27,9 +22,10 @@ class ConvBlock(nn.Module):
         out = self.nonlin(out)
         return out
 
+
 class Conv3x3(nn.Module):
-    """Layer to pad and convolve input
-    """
+    """Layer to pad and convolve input"""
+
     def __init__(self, in_channels, out_channels, use_refl=True):
         super(Conv3x3, self).__init__()
 
@@ -44,20 +40,19 @@ class Conv3x3(nn.Module):
         out = self.conv(out)
         return out
 
-def upsample(x):
-    """Upsample input tensor by a factor of 2
-    """
-    return F.interpolate(x, scale_factor=2, mode="nearest")
 
+def upsample(x):
+    """Upsample input tensor by a factor of 2"""
+    return F.interpolate(x, scale_factor=2, mode="nearest")
 
 
 class DispDecoder(nn.Module):
     def __init__(self, num_ch_enc, scales=range(4), num_output_channels=1, use_skips=True):
         super(DispDecoder, self).__init__()
-        
+
         self.num_output_channels = num_output_channels
         self.use_skips = use_skips
-        self.upsample_mode = 'nearest'
+        self.upsample_mode = "nearest"
         self.scales = scales
 
         self.num_ch_enc = num_ch_enc
@@ -114,13 +109,12 @@ class DispDecoder(nn.Module):
             if i in self.scales:
                 idx = self.i_to_scaleIdx_conversion[i]
                 self.outputs.append(self.softplus(self.dispconvs[idx](x)))
-            
+
         self.outputs = self.outputs[::-1]
-        return self.outputs 
+        return self.outputs
 
 
 class DispResNet(nn.Module):
-
     def __init__(self, num_layers=18, pretrained=True):
         super(DispResNet, self).__init__()
         self.obj_height_prior = nn.Parameter(torch.tensor(0.02))
@@ -153,5 +147,3 @@ if __name__ == "__main__":
     tgt_disp = model(tgt_img)
 
     print(tgt_disp.size())
-
-

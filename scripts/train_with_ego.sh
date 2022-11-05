@@ -1,37 +1,36 @@
 ############################################################################################################
 
-
 ### Dataset directory ###
-TRAIN_SET=/home/rcv/seokju/cityscapes_256
+# TRAIN_DIR = ../kitti_odometry
+ROOT_DIR=/home/gkinoshita/workspace/Insta-DM
+TRAIN_DIR=${ROOT_DIR}/kitti_odometry
 
+DEST_DIR=${ROOT_DIR}/train_results
 
-### Cityscapes model ###
-PRETRAINED=checkpoints/models-release/CS
+### KITTI model ###
+PRETRAINED=${ROOT_DIR}/pretrained/KITTI
 
 
 ############################################################################################################
 
-
 ### For training ###
-CUDA_VISIBLE_DEVICES=0,1 python train.py $TRAIN_SET \
---pretrained-disp $PRETRAINED/resnet18_disp_cs.tar \
---pretrained-ego-pose $PRETRAINED/resnet18_ego_cs.tar \
---pretrained-obj-pose $PRETRAINED/resnet18_obj_cs.tar \
+CUDA_VISIBLE_DEVICES=0,1,2 python train_with_ego.py $TRAIN_DIR \
 -b 4 -p 2.0 -c 1.0 -s 0.1 -o 0.02 -mc 0.1 -hp 0 -dm 0 -mni 2 \
 --epoch-size 1000 \
 --with-ssim --with-mask --with-auto-mask \
---name insta_dm_cs \
-
+--dest-dir $DEST_DIR
+# --pretrained-disp $PRETRAINED/resnet18_disp_kt.tar \
+# --pretrained-ego-pose $PRETRAINED/resnet18_ego_kt.tar \
+# --pretrained-obj-pose $PRETRAINED/resnet18_obj_kt.tar \
 
 # ### For debugging ###
 # CUDA_VISIBLE_DEVICES=2,3 python train.py $TRAIN_SET \
-# --pretrained-disp $PRETRAINED/resnet18_disp_cs.tar \
-# --pretrained-ego-pose $PRETRAINED/resnet18_ego_cs.tar \
-# --pretrained-obj-pose $PRETRAINED/resnet18_obj_cs.tar \
+# --pretrained-disp $PRETRAINED/resnet18_disp_kt.tar \
+# --pretrained-ego-pose $PRETRAINED/resnet18_ego_kt.tar \
+# --pretrained-obj-pose $PRETRAINED/resnet18_obj_kt.tar \
 # -b 1 -p 2.0 -c 1.0 -s 0.1 -o 0.02 -mc 0.1 -hp 0 -dm 0 -mni 2 \
 # --epoch-size 1000 \
 # --with-ssim --with-mask --with-auto-mask \
+# --with-gt \
 # -j 0 --name debug --debug-mode \
 # --seed 0 \
-
-

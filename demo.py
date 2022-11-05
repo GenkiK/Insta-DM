@@ -24,9 +24,13 @@ from scipy import stats
 import custom_transforms
 import drawRobotics as dR
 import models
-from demo_utils import (compute_batch_bg_warping, compute_batch_obj_warping,
-                        compute_obj_translation, compute_reverse_warp_ego,
-                        compute_reverse_warp_obj)
+from demo_utils import (
+    compute_batch_bg_warping,
+    compute_batch_obj_warping,
+    compute_obj_translation,
+    compute_reverse_warp_ego,
+    compute_reverse_warp_obj,
+)
 from flow_io import flow_read
 from rigid_warp import cam2homo, flow_warp, pixel2cam, pose_vec2mat
 
@@ -97,7 +101,7 @@ class SequenceFolder:
         seg1 = seg1[torch.cat([torch.zeros(1).long(), seg1.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)].unsqueeze(0)
 
         insts0, insts1 = [], []
-        # TODO: nocとは何？
+        # HACK: nocとは何？
         noc_f, noc_b = find_noc_masks(flof, flob)
         seg0w, _ = flow_warp(seg1, flof)  # おそらくseg0w == warped_seg0_from_seg1
         seg1w, _ = flow_warp(seg0, flob)
@@ -463,36 +467,42 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             tgt_diff = np.abs(i_w - tgt).mean(axis=2)
 
             th = 5
-            samp = 20
+            num_samples = 20  # 元の変数名はsamp
             r2t_obj_coords = r2t_objs_coords.sum(dim=0, keepdim=True)
             rtt_obj_coords = rtt_objs_coords.sum(dim=0, keepdim=True)
             tgt_obj_coords = tgt_objs_coords.sum(dim=0, keepdim=True)
-            r2t_filt = np.abs(stats.zscore(r2t_obj_coords[bb, 2].view(-1)[r2t_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
-            rtt_filt = np.abs(stats.zscore(rtt_obj_coords[bb, 2].view(-1)[rtt_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
-            tgt_filt = np.abs(stats.zscore(tgt_obj_coords[bb, 2].view(-1)[tgt_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
-            npts_r2t = int(r2t_filt.sum())
-            npts_rtt = int(rtt_filt.sum())
-            npts_tgt = int(tgt_filt.sum())
+            r2t_filter = (
+                np.abs(stats.zscore(r2t_obj_coords[bb, 2].view(-1)[r2t_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
+            )
+            rtt_filter = (
+                np.abs(stats.zscore(rtt_obj_coords[bb, 2].view(-1)[rtt_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
+            )
+            tgt_filter = (
+                np.abs(stats.zscore(tgt_obj_coords[bb, 2].view(-1)[tgt_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
+            )
+            npts_r2t = int(r2t_filter.sum())
+            npts_rtt = int(rtt_filter.sum())
+            npts_tgt = int(tgt_filter.sum())
             X_r2t = (
                 r2t_obj_coords[bb, 0]
                 .view(-1)[r2t_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[r2t_filt][range(0, npts_r2t, samp)]
+                .numpy()[r2t_filter][range(0, npts_r2t, num_samples)]
             )
             Y_r2t = (
                 r2t_obj_coords[bb, 1]
                 .view(-1)[r2t_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[r2t_filt][range(0, npts_r2t, samp)]
+                .numpy()[r2t_filter][range(0, npts_r2t, num_samples)]
             )
             Z_r2t = (
                 r2t_obj_coords[bb, 2]
                 .view(-1)[r2t_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[r2t_filt][range(0, npts_r2t, samp)]
+                .numpy()[r2t_filter][range(0, npts_r2t, num_samples)]
             )
             C_r2t = (
                 r2t_obj_imgs[0]
@@ -500,7 +510,7 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
                 .view(3, -1)[:, r2t_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[:, r2t_filt][:, range(0, npts_r2t, samp)]
+                .numpy()[:, r2t_filter][:, range(0, npts_r2t, num_samples)]
                 * 0.5
                 + 0.5
             )
@@ -512,21 +522,21 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
                 .view(-1)[rtt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[rtt_filt][range(0, npts_rtt, samp)]
+                .numpy()[rtt_filter][range(0, npts_rtt, num_samples)]
             )
             Y_rtt = (
                 rtt_obj_coords[bb, 1]
                 .view(-1)[rtt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[rtt_filt][range(0, npts_rtt, samp)]
+                .numpy()[rtt_filter][range(0, npts_rtt, num_samples)]
             )
             Z_rtt = (
                 rtt_obj_coords[bb, 2]
                 .view(-1)[rtt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[rtt_filt][range(0, npts_rtt, samp)]
+                .numpy()[rtt_filter][range(0, npts_rtt, num_samples)]
             )
             C_rtt = (
                 rtt_obj_imgs[0]
@@ -534,7 +544,7 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
                 .view(3, -1)[:, rtt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[:, rtt_filt][:, range(0, npts_rtt, samp)]
+                .numpy()[:, rtt_filter][:, range(0, npts_rtt, num_samples)]
                 * 0.5
                 + 0.5
             )
@@ -546,28 +556,28 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
                 .view(-1)[tgt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[tgt_filt][range(0, npts_tgt, samp)]
+                .numpy()[tgt_filter][range(0, npts_tgt, num_samples)]
             )
             Y_tgt = (
                 tgt_obj_coords[bb, 1]
                 .view(-1)[tgt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[tgt_filt][range(0, npts_tgt, samp)]
+                .numpy()[tgt_filter][range(0, npts_tgt, num_samples)]
             )
             Z_tgt = (
                 tgt_obj_coords[bb, 2]
                 .view(-1)[tgt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[tgt_filt][range(0, npts_tgt, samp)]
+                .numpy()[tgt_filter][range(0, npts_tgt, num_samples)]
             )
             C_tgt = (
                 tgt_obj_img.sum(dim=0)
                 .view(3, -1)[:, tgt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[:, tgt_filt][:, range(0, npts_tgt, samp)]
+                .numpy()[:, tgt_filter][:, range(0, npts_tgt, num_samples)]
                 * 0.5
                 + 0.5
             )
@@ -582,7 +592,7 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
                 .view(3, -1)[:, tgt_obj_coords[bb].mean(dim=0).view(-1) != 0]
                 .detach()
                 .cpu()
-                .numpy()[:, tgt_filt][:, range(0, npts_tgt, samp)]
+                .numpy()[:, tgt_filter][:, range(0, npts_tgt, num_samples)]
                 * 0.5
                 + 0.5
             ).clip(min=0.0, max=1.0)

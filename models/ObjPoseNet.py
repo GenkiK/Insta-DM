@@ -1,16 +1,9 @@
-'''
-Seokju Lee
-
-'''
-
 from __future__ import absolute_import, division, print_function
+
 import torch
 import torch.nn as nn
-from collections import OrderedDict
-from .resnet_encoder import *
-import numpy as np
-import pdb
 
+from .resnet_encoder import ResnetEncoder
 
 
 class PoseDecoder(nn.Module):
@@ -47,29 +40,28 @@ class PoseDecoder(nn.Module):
             if i != 2:
                 out = self.relu(out)
 
-        out = out.mean(dim=[2,3])
+        out = out.mean(dim=[2, 3])
 
         pose = 0.01 * out.view(-1, 3)
 
         return pose
 
 
-
 class ObjPoseNet(nn.Module):
-
     def __init__(self, num_layers=18, pretrained=True):
         super(ObjPoseNet, self).__init__()
-        self.encoder = ResnetEncoder(num_layers = num_layers, pretrained = pretrained, num_input_images=2)
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained, num_input_images=2)
         self.decoder = PoseDecoder(self.encoder.num_ch_enc)
 
     def init_weights(self):
         pass
 
     def forward(self, img1, img2):
-        x = torch.cat([img1,img2],1)
+        x = torch.cat([img1, img2], 1)
         features = self.encoder(x)
         pose = self.decoder([features])
         return pose
+
 
 if __name__ == "__main__":
 

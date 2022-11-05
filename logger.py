@@ -11,21 +11,21 @@ class TermLogger(object):
         self.valid_size = valid_size
         self.t = Terminal()
         s = 10
-        e = 1   # epoch bar position
+        e = 1  # epoch bar position
         tr = 3  # train bar position
         ts = 6  # valid bar position
         value = self.t.height
         h = int(0 if value is None else value)
 
         for i in range(10):
-            print('')
-        self.epoch_bar = progressbar.ProgressBar(max_value=n_epochs, fd=Writer(self.t, (0, h-s+e)))
+            print("")
+        self.epoch_bar = progressbar.ProgressBar(max_value=n_epochs, fd=Writer(self.t, (0, h - s + e)))
 
-        self.train_writer = Writer(self.t, (0, h-s+tr))
-        self.train_bar_writer = Writer(self.t, (0, h-s+tr+1))
+        self.train_writer = Writer(self.t, (0, h - s + tr))
+        self.train_bar_writer = Writer(self.t, (0, h - s + tr + 1))
 
-        self.valid_writer = Writer(self.t, (0, h-s+ts))
-        self.valid_bar_writer = Writer(self.t, (0, h-s+ts+1))
+        self.valid_writer = Writer(self.t, (0, h - s + ts))
+        self.valid_bar_writer = Writer(self.t, (0, h - s + ts + 1))
 
         self.reset_train_bar()
         self.reset_valid_bar()
@@ -64,28 +64,28 @@ class Writer(object):
 class AverageMeter(object):
     """Computes and stores the average and current value"""
 
-    def __init__(self, i=1, precision=3):
-        self.meters = i
+    def __init__(self, n_meters=1, precision=3):
+        self.n_meters = n_meters
         self.precision = precision
-        self.reset(self.meters)
+        self.reset()
 
-    def reset(self, i):
-        self.val = [0]*i
-        self.avg = [0]*i
-        self.sum = [0]*i
+    def reset(self):
+        self.val = [0] * self.n_meters
+        self.avg = [0] * self.n_meters
+        self.sum = [0] * self.n_meters
         self.count = 0
 
     def update(self, val, n=1):
         if not isinstance(val, list):
             val = [val]
-        assert(len(val) == self.meters)
+        assert len(val) == self.n_meters
         self.count += n
-        for i,v in enumerate(val):
+        for i, v in enumerate(val):
             self.val[i] = v
             self.sum[i] += v * n
             self.avg[i] = self.sum[i] / self.count
 
     def __repr__(self):
-        val = ' '.join(['{:.{}f}'.format(v, self.precision) for v in self.val])
-        avg = ' '.join(['{:.{}f}'.format(a, self.precision) for a in self.avg])
-        return '{} ({})'.format(val, avg)
+        val = " ".join(["{:.{}f}".format(v, self.precision) for v in self.val])
+        avg = " ".join(["{:.{}f}".format(a, self.precision) for a in self.avg])
+        return "{} ({})".format(val, avg)

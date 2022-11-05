@@ -1,5 +1,4 @@
 """
-Seokju Lee
 PyTorch version 1.4.0, 1.7.0 confirmed
 
 RUN SCRIPT:
@@ -33,10 +32,13 @@ import custom_transforms_val
 import models
 from datasets.sequence_folders import SequenceFolder
 from logger import AverageMeter, TermLogger
-from loss_functions import (compute_errors, compute_mof_consistency_loss,
-                            compute_obj_size_constraint_loss,
-                            compute_photo_and_geometry_loss,
-                            compute_smooth_loss)
+from loss_functions import (
+    compute_errors,
+    compute_mof_consistency_loss,
+    compute_obj_size_constraint_loss,
+    compute_photo_and_geometry_loss,
+    compute_smooth_loss,
+)
 from rigid_warp import forward_warp
 from utils import save_checkpoint, viz_flow
 
@@ -161,7 +163,7 @@ def main():
     if args.with_gt:
         from datasets.validation_folders import ValidationSet
 
-        val_set = ValidationSet(root=args.data, transform=valid_transform)
+        val_set = ValidationSet(root_dir=args.data, transform=valid_transform)
     else:
         val_set = SequenceFolder(
             root_dir=args.data,
@@ -618,7 +620,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
 def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, epoch, logger):
     global device
     batch_time = AverageMeter()
-    losses = AverageMeter(i=4, precision=4)
+    losses = AverageMeter(n_meters=4, precision=4)
 
     w1, w2, w3 = args.photo_loss_weight, args.geometry_consistency_weight, args.smooth_loss_weight
 
@@ -729,9 +731,9 @@ def validate_with_gt(args, val_loader, disp_net, epoch, logger):
     global device_val
     batch_time = AverageMeter()
     error_names = ["abs_diff", "abs_rel", "sq_rel", "a1", "a2", "a3"]
-    errors = AverageMeter(i=len(error_names))
-    errors_fg = AverageMeter(i=len(error_names))
-    errors_bg = AverageMeter(i=len(error_names))
+    errors = AverageMeter(n_meters=len(error_names))
+    errors_fg = AverageMeter(n_meters=len(error_names))
+    errors_bg = AverageMeter(n_meters=len(error_names))
 
     # switch to evaluate mode
     disp_net = disp_net.module.to(device_val)

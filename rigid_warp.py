@@ -1,6 +1,4 @@
 """
-Seokju Lee
-
 (+) inverse warping
 (+) forward warping
 (+) inverse warping with motion field
@@ -10,14 +8,9 @@ Seokju Lee
 
 from __future__ import division
 
-import pdb
-import random
-import time
-
 import numpy as np
 import torch
 import torch.nn.functional as F
-from matplotlib import pyplot as plt
 from torch_sparse import coalesce
 
 pixel_coords = None
@@ -188,7 +181,7 @@ def mat2euler(R):
     Returns:
         angle: rotation angle along 3 axis (in radians) -- size = [B, 3]
     """
-    bs = R.size(0)
+    R = R.view((-1, 3, 3))
 
     sy = torch.sqrt(R[:, 0, 0] * R[:, 0, 0] + R[:, 1, 0] * R[:, 1, 0])
     singular = (sy < 1e-6).float()
@@ -205,7 +198,7 @@ def mat2euler(R):
     out_euler_y = y * (1 - singular) + ys * singular
     out_euler_z = z * (1 - singular) + zs * singular
 
-    return torch.stack([out_euler_x, out_euler_y, out_euler_z], dim=-1)
+    return torch.stack([out_euler_x, out_euler_y, out_euler_z], dim=-1).squeeze()
 
 
 def euler2mat(angle):
@@ -217,6 +210,7 @@ def euler2mat(angle):
     Returns:
         Rotation matrix corresponding to the euler angles -- size = [B, 3, 3]
     """
+    angle = angle.view((-1, 3))
     B = angle.size(0)
     x, y, z = angle[:, 0], angle[:, 1], angle[:, 2]
 
@@ -225,27 +219,27 @@ def euler2mat(angle):
 
     zeros = z.detach() * 0
     ones = zeros.detach() + 1
-    zmat = torch.stack([cosz, -sinz, zeros, sinz, cosz, zeros, zeros, zeros, ones], dim=1).reshape(B, 3, 3)
+    zmat = torch.stack([cosz, -sinz, zeros, sinz, cosz, zeros, zeros, zeros, ones], dim=1).view(B, 3, 3)
 
     cosy = torch.cos(y)
     siny = torch.sin(y)
 
-    ymat = torch.stack([cosy, zeros, siny, zeros, ones, zeros, -siny, zeros, cosy], dim=1).reshape(B, 3, 3)
+    ymat = torch.stack([cosy, zeros, siny, zeros, ones, zeros, -siny, zeros, cosy], dim=1).view(B, 3, 3)
 
     cosx = torch.cos(x)
     sinx = torch.sin(x)
 
-    xmat = torch.stack([ones, zeros, zeros, zeros, cosx, -sinx, zeros, sinx, cosx], dim=1).reshape(B, 3, 3)
+    xmat = torch.stack([ones, zeros, zeros, zeros, cosx, -sinx, zeros, sinx, cosx], dim=1).view(B, 3, 3)
 
     rotMat = xmat @ ymat @ zmat
-    return rotMat
+    return rotMat.squeeze()
 
 
 def quat2mat(quat):
     """
     Convert quaternion coefficients to rotation matrix.
     Args:
-        quat: first three coeff of quaternion of rotation. fourht is then computed to have a norm of 1 -- size = [B, 3]
+        quat: first three coeff of quaternion of rotation. fourth is then computed to have a norm of 1 -- size = [B, 3]
     Returns:
         Rotation matrix corresponding to the quaternion -- size = [B, 3, 3]
     """

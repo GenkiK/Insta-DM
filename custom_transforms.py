@@ -9,20 +9,66 @@ import random
 import cv2
 import numpy as np
 import torch
-from PIL import Image
+
+from rigid_warp import euler2mat, mat2euler
 
 """Set of transform random routines that takes list of inputs as arguments,
 in order to have random but coherent transformations."""
+
+# def matrix2euler(rotation_matrices: torch.Tensor) -> torch.Tensor:
+#     """
+#     Rz(k3) @ Ry(k2) @ Rx(k1) = [[c2c3, s1s2c3-c1s3, c1s2c3+s1s3],
+#                                 [c2s3, s1s2s3+c1c3, c1s2s3-s1c3],
+#                                 [-s2, s1c2, c1c2]]
+#     return [[x_rad, y_rad, z_rad], ]
+#     """
+#     rotation_matrices = rotation_matrices.view((-1, 3, 3))
+#     rad_angles = torch.zeros((rotation_matrices.shape[0], 3))
+#     rad_angles[:, 1] = -torch.arcsin(rotation_matrices[:, 2, 0])
+
+#     # Gimbal lock case (c2 == 0)
+#     tolerance = 1e-6
+
+#     # Find indices where this is the case
+#     gimbal_idx = torch.abs(rotation_matrices[:, 0, 0]) < tolerance
+
+#     # Calculate angle 1 and set angle 3 = 0 for those indices
+#     r23 = rotation_matrices[gimbal_idx, 1, 2]
+#     r22 = rotation_matrices[gimbal_idx, 1, 1]
+#     rad_angles[gimbal_idx, 0] = torch.arctan2(-r23, r22)
+#     rad_angles[gimbal_idx, 2] = 0
+
+#     # # Normal case (s2 > 0)
+#     idx = np.invert(gimbal_idx)
+#     r32 = rotation_matrices[idx, 2, 1]
+#     r33 = rotation_matrices[idx, 2, 2]
+#     r21 = rotation_matrices[idx, 1, 0]
+#     r11 = rotation_matrices[idx, 0, 0]
+#     rad_angles[idx, 0] = torch.arctan2(r32, r33)
+#     rad_angles[idx, 2] = torch.arctan2(r21, r11)
+#     return rad_angles.squeeze()
+
+
+def rotate_euler(rad_angles: torch.Tensor, axes: str = "yz"):
+    """
+    rad_angles: torch.Size([N, 3])
+    """
+    rad_angles = rad_angles.view((-1, 3))
+    axis_str2num = {"x": 0, "y": 1, "z": 2}
+    for axis_str in list(axes):
+        axis_idx = axis_str2num[axis_str]
+        rad_angles[:, axis_idx] = -rad_angles[:, axis_idx]
+    return rad_angles.squeeze()
 
 
 class Compose(object):
     def __init__(self, transforms):
         self.transforms = transforms
 
-    def __call__(self, images, segms, intrinsics):
+    def __call__(self, images, segms, intrinsics, rel_poses):
         for transform in self.transforms:
-            images, segms, intrinsics = transform(images, segms, intrinsics)
-        return images, segms, intrinsics
+            images, segms, intrinsics, rel_poses = transform(images, segms, intrinsics, rel_poses)
+        return images, segms, intrinsics, rel_poses
 
 
 class Normalize(object):
@@ -30,17 +76,19 @@ class Normalize(object):
         self.mean = mean
         self.std = std
 
-    def __call__(self, images, segms, intrinsics):
+    def __call__(self, images, segms, intrinsics, rel_poses):
         for image in images:
             for img_ch, mean_ch, std_ch in zip(image, self.mean, self.std):
                 img_ch.sub_(mean_ch).div_(std_ch)
-        return images, segms, intrinsics
+        return images, segms, intrinsics, rel_poses
 
 
 class ArrayToTensor(object):
-    """Converts a list of numpy.ndarray (H x W x C) along with a intrinsics matrix to a list of torch.FloatTensor of shape (C x H x W) with a intrinsics tensor."""
+    """
+    Converts a list of ndarray (HxWxC) along with a intrinsics matrix to a list of FloatTensor of shape (CxHxW) with a intrinsics tensor.
+    """
 
-    def __call__(self, images, segms, intrinsics):
+    def __call__(self, images, segms, intrinsics, rel_poses):
         img_tensors = []
         seg_tensors = []
         for img in images:
@@ -49,41 +97,70 @@ class ArrayToTensor(object):
         for segm in segms:
             segm = np.transpose(segm, (2, 0, 1))
             seg_tensors.append(torch.from_numpy(segm).float())
-        return img_tensors, seg_tensors, intrinsics
+        return img_tensors, seg_tensors, intrinsics, rel_poses
 
 
 class RandomHorizontalFlip(object):
     """Randomly horizontally flips the given numpy array with a probability of 0.5"""
 
-    def __call__(self, images, segms, intrinsics):
+    def __call__(self, images, segms, intrinsics, rel_poses):
         if random.random() < 0.5:
-            output_intrinsics = np.copy(intrinsics)
             output_images = [np.copy(np.fliplr(img)) for img in images]
             output_segms = [np.copy(np.fliplr(segm)) for segm in segms]
 
             w = output_images[0].shape[1]
-            output_intrinsics[0, 2] = w - output_intrinsics[0, 2]
+            intrinsics[0, 2] = w - intrinsics[0, 2]
+
+            for rel_pose in rel_poses:
+                flip_rotation = rel_pose[:, :3]
+                flip_rotation = euler2mat(rotate_euler(mat2euler(flip_rotation)))
+                flip_translation = rel_pose[:, 3]
+                flip_translation[0] = -flip_translation[0]
+                rel_poses[0] = torch.cat((flip_rotation, flip_translation.view(3, 1)), dim=1)
         else:
             output_images = images
             output_segms = segms
-            output_intrinsics = intrinsics
-        return output_images, output_segms, output_intrinsics
+        return output_images, output_segms, intrinsics, rel_poses
+
+
+# class RandomHorizontalFlip(object):
+#     """Randomly horizontally flips the given numpy array with a probability of 0.5"""
+
+#     def __call__(self, images, segms, intrinsics, rel_poses):
+#         if random.random() < 0.5:
+#             output_images = [np.copy(np.fliplr(img)) for img in images]
+#             output_segms = [np.copy(np.fliplr(segm)) for segm in segms]
+
+#             w = output_images[0].shape[1]
+#             intrinsics[0, 2] = w - intrinsics[0, 2]
+
+#             flip_rotations = rel_poses[:, :, :3]
+#             flip_rotations = euler2mat(rotate_euler(mat2euler(flip_rotations)))
+#             flip_translations = rel_poses[:, :, 3]
+#             flip_translations[:, 0] = -flip_translations[:, 0]
+#             rel_poses = torch.cat((flip_rotations, flip_translations.view(-1, 3, 1)), dim=2)
+#             assert rel_poses.shape[1:] == (3, 4)
+#         else:
+#             output_images = images
+#             output_segms = segms
+#         return output_images, output_segms, intrinsics, rel_poses
 
 
 class RandomScaleCrop(object):
     """Randomly zooms images up to 15% and crop them to keep same size as before."""
 
-    def __call__(self, images, segms, intrinsics):
-        output_intrinsics = np.copy(intrinsics)
-
+    def __call__(self, images, segms, intrinsics, rel_poses):
+        # HACK: rel_posesはそのままでいいのか確認
         h, w, _ = images[0].shape
         x_scaling, y_scaling = np.random.uniform(1, 1.15, 2)
         scaled_h, scaled_w = int(h * y_scaling), int(w * x_scaling)
 
-        output_intrinsics[0] *= x_scaling
-        output_intrinsics[1] *= y_scaling
+        intrinsics[0] *= x_scaling
+        intrinsics[1] *= y_scaling
 
-        scaled_images = [np.array(Image.fromarray(img).resize((scaled_h, scaled_w), resample=2)) for img in images]
+        # scaled_images = [np.array(Image.fromarray(img.astype(np.uint8)).resize((scaled_h, scaled_w), resample=2)) for img in images]
+        # HACK: scaled_h, scaled_wをsegm同様の順序に変えてみた
+        scaled_images = [cv2.resize(img.astype(np.uint8), (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR) for img in images]
         scaled_segms = [
             cv2.resize(segm, (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST) for segm in segms
         ]  # 이 부분에서 1채널 세그먼트 [256 x 832 x 1] >> [256 x 832]로 변환됨!
@@ -93,7 +170,7 @@ class RandomScaleCrop(object):
         cropped_images = [img[offset_y : offset_y + h, offset_x : offset_x + w] for img in scaled_images]
         cropped_segms = [segm[offset_y : offset_y + h, offset_x : offset_x + w] for segm in scaled_segms]
 
-        output_intrinsics[0, 2] -= offset_x
-        output_intrinsics[1, 2] -= offset_y
+        intrinsics[0, 2] -= offset_x
+        intrinsics[1, 2] -= offset_y
 
-        return cropped_images, cropped_segms, output_intrinsics
+        return cropped_images, cropped_segms, intrinsics, rel_poses
