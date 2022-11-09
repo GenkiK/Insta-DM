@@ -5,7 +5,7 @@ import torch
 import torch.utils.data as data
 from imageio import imread
 
-from sequence_folders import convert_poses_abs2rel
+from datasets.my_sequence_folders import convert_poses_abs2rel
 
 # def crawl_folders(folders_list):
 #     imgs = []
