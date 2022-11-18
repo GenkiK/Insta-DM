@@ -4,6 +4,10 @@ pretrained/
 *.code-workspace
 memo*
 .vscode/
+*sbox/
+*.sif
+**/*hoge*/**
+**/*fuga*/**
 
 ################ python ###############
 # Byte-compiled / optimized / DLL files
