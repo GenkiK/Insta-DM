@@ -115,9 +115,11 @@ class DispDecoder(nn.Module):
 
 
 class DispResNet(nn.Module):
-    def __init__(self, num_layers=18, pretrained=True):
+    # TODO: num_categoriesを変更する
+    def __init__(self, num_layers=18, pretrained=True, num_categories=8):
         super(DispResNet, self).__init__()
         self.obj_height_prior = nn.Parameter(torch.tensor(0.02))
+        # self.obj_height_priors = nn.Parameter(torch.ones(num_categories))
 
         self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained, num_input_images=1)
         self.decoder = DispDecoder(self.encoder.num_ch_enc)

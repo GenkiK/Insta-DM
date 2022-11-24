@@ -18,11 +18,10 @@ pixel_coords = None
 
 def set_id_grid(depth):
     global pixel_coords
-    b, h, w = depth.size()
+    _, h, w = depth.size()
     i_range = torch.arange(0, h).view(1, h, 1).expand(1, h, w).type_as(depth)  # [1, H, W]
     j_range = torch.arange(0, w).view(1, 1, w).expand(1, h, w).type_as(depth)  # [1, H, W]
     ones = torch.ones(1, h, w).type_as(depth)
-
     pixel_coords = torch.stack((j_range, i_range, ones), dim=1)  # [1, 3, H, W]
 
 
@@ -31,7 +30,9 @@ def check_sizes(input, input_name, expected):
     for i, size in enumerate(expected):
         if size.isdigit():
             condition.append(input.size(i) == int(size))
-    assert all(condition), "wrong size for {}, expected {}, got  {}".format(input_name, "x".join(expected), list(input.size()))
+    assert all(condition), "wrong size for {}, expected {}, got  {}".format(
+        input_name, "x".join(expected), list(input.size())
+    )
 
 
 def pixel2cam(depth, intrinsics_inv):
@@ -49,11 +50,10 @@ def pixel2cam(depth, intrinsics_inv):
         set_id_grid(depth)
     current_pixel_coords = pixel_coords[:, :, :h, :w].expand(b, 3, h, w).reshape(b, 3, -1)  # [B, 3, H*W]
     cam_coords = (intrinsics_inv @ current_pixel_coords).reshape(b, 3, h, w)  # [B, 3, H, W]
-
     return cam_coords * depth.unsqueeze(1)
 
 
-def cam2pixel(cam_coords, proj_c2p_rot, proj_c2p_tr, padding_mode):
+def cam2pixel(cam_coords, proj_c2p_rot, proj_c2p_tr):
     """
     Transform coordinates in the camera frame to the pixel frame.
     Args:
@@ -332,7 +332,6 @@ def pose_mof2mat(mof, rotation_mode="euler"):
 
     rot_mat = rot_mat.reshape(bs, 3, 3, 1, 1).repeat(1, 1, 1, hh, ww)  # [B, 3, 3, H, W]
     transform_mat = torch.cat([rot_mat, translation], dim=2)  # [B*N, 3, 4]
-    # pdb.set_trace()
     return transform_mat
 
 
@@ -356,11 +355,12 @@ def inverse_warp(img, depth, pose, intrinsics, rotation_mode="euler", padding_mo
     cam_coords = pixel2cam(depth, intrinsics.inverse())  # [B,3,H,W]
     pose_mat = pose_vec2mat(pose, rotation_mode)  # [B,3,4]
 
-    # Get projection matrix for tgt camera frame to source pixel frame
+    # Get projection matrix for tgt camera frame to src pixel frame
+    # たぶんpose_matはtgt->srcのrotation, translation
     proj_cam_to_src_pixel = intrinsics @ pose_mat  # [B, 3, 4]
 
-    rot, tr = proj_cam_to_src_pixel[:, :, :3], proj_cam_to_src_pixel[:, :, -1:]
-    src_pixel_coords = cam2pixel(cam_coords, rot, tr, padding_mode)  # [B,H,W,2]
+    rot, translation = proj_cam_to_src_pixel[:, :, :3], proj_cam_to_src_pixel[:, :, -1:]
+    src_pixel_coords = cam2pixel(cam_coords, rot, translation)  # [B,H,W,2]
 
     if np.array(torch.__version__[:3]).astype(float) >= 1.3:
         projected_img = F.grid_sample(img, src_pixel_coords, padding_mode=padding_mode, align_corners=True)
@@ -404,11 +404,15 @@ def inverse_warp2(img, depth, pose, intrinsics, ref_depth, rotation_mode="euler"
         for pp, p_vec in enumerate(pose):
             if pp == 0:
                 pose_mat = pose_vec2mat(p_vec, rotation_mode)  # RT, [B,3,4]
-                aux_mat = torch.tensor([0, 0, 0, 1]).type_as(pose_mat).unsqueeze(0).unsqueeze(0).repeat(batch_size, 1, 1)  # [B,1,1]
+                aux_mat = (
+                    torch.tensor([0, 0, 0, 1]).type_as(pose_mat).unsqueeze(0).unsqueeze(0).repeat(batch_size, 1, 1)
+                )  # [B,1,1]
                 pose_mat = torch.cat([pose_mat, aux_mat], dim=1)  # [B,4,4]
                 continue
             next_mat = pose_vec2mat(p_vec, rotation_mode)  # RT, [B,3,4]
-            aux_mat = torch.tensor([0, 0, 0, 1]).type_as(next_mat).unsqueeze(0).unsqueeze(0).repeat(batch_size, 1, 1)  # [B,1,1]
+            aux_mat = (
+                torch.tensor([0, 0, 0, 1]).type_as(next_mat).unsqueeze(0).unsqueeze(0).repeat(batch_size, 1, 1)
+            )  # [B,1,1]
             next_mat = torch.cat([next_mat, aux_mat], dim=1)
             pose_mat = pose_mat @ next_mat  # [B,4,4]
             # pose_mat = next_mat @ pose_mat              # [B,4,4]
@@ -431,7 +435,9 @@ def inverse_warp2(img, depth, pose, intrinsics, ref_depth, rotation_mode="euler"
     valid_mask = valid_points.unsqueeze(1).float()
 
     if np.array(torch.__version__[:3]).astype(float) >= 1.3:
-        projected_depth = F.grid_sample(ref_depth, src_pixel_coords, padding_mode=padding_mode, align_corners=True).clamp(min=1e-3)
+        projected_depth = F.grid_sample(
+            ref_depth, src_pixel_coords, padding_mode=padding_mode, align_corners=True
+        ).clamp(min=1e-3)
     else:
         projected_depth = F.grid_sample(ref_depth, src_pixel_coords, padding_mode=padding_mode).clamp(min=1e-3)
 
@@ -503,16 +509,16 @@ def depth2flow(depth, pose, intrinsics, reverse_pose=False, rotation_mode="euler
     return flow_rigid, valid_mask
 
 
-def cam2pix_trans(cam_coords, pose_mat, intrinsics):
-    b, _, h, w = cam_coords.size()
-    rot, tr = pose_mat[:, :, :3], pose_mat[:, :, -1:]  # [B, 3, 3], [B, 3, 1]
-    cam_coords_flat = cam_coords.reshape(b, 3, -1)  # [B, 3, H*W]
-    cam_coords_trans = rot @ cam_coords_flat  # [B, 3, H*W]
-    cam_coords_trans = cam_coords_trans + tr  # [B, 3, H*W]
+def cam2pixel_with_transform(cam_coords, pose_mat, intrinsics):
+    batch, _, h, w = cam_coords.size()
+    rot, translation = pose_mat[:, :, :3], pose_mat[:, :, -1:]  # [B, 3, 3], [B, 3, 1]
+    cam_coords_flat = cam_coords.reshape(batch, 3, -1)  # [B, 3, H*W]
+    cam_coords_transformed = rot @ cam_coords_flat  # [B, 3, H*W]
+    cam_coords_transformed = cam_coords_transformed + translation  # [B, 3, H*W]
 
-    X = cam_coords_trans[:, 0]  # [B, H*W]
-    Y = cam_coords_trans[:, 1]  # [B, H*W]
-    Z = cam_coords_trans[:, 2].clamp(min=1e-3)  # [B, H*W]
+    X = cam_coords_transformed[:, 0]  # [B, H*W]
+    Y = cam_coords_transformed[:, 1]  # [B, H*W]
+    Z = cam_coords_transformed[:, 2].clamp(min=1e-3)  # [B, H*W]
 
     X_norm = X / Z  # [B, H*W]
     Y_norm = Y / Z  # [B, H*W]
@@ -520,10 +526,10 @@ def cam2pix_trans(cam_coords, pose_mat, intrinsics):
     P_norm = torch.stack([X_norm, Y_norm, Z_norm], dim=1)  # [B, 3, H*W]
     pix_coords = (intrinsics @ P_norm).permute(0, 2, 1)[:, :, :2]  # [B, H*W, 2]
 
-    return pix_coords.reshape(b, h, w, 2), Z.reshape(b, 1, h, w)
+    return pix_coords.reshape(batch, h, w, 2), Z.reshape(batch, 1, h, w)
 
 
-def forward_warp(img, depth, pose, intrinsics, upscale=None, rotation_mode="euler", padding_mode="zeros"):
+def forward_warp(img, depth, pose, intrinsics, upscale=None, rotation_mode="euler"):
     """
     Inverse warp a source image to the target image plane.
     Args:
@@ -534,32 +540,22 @@ def forward_warp(img, depth, pose, intrinsics, upscale=None, rotation_mode="eule
     Returns:
         projected_img: Source image warped to the target image plane
         valid_points: Boolean array indicating point validity
-
-        plt.close('all')
-        plt.figure(1); plt.imshow(img[0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show()
-        plt.figure(2); plt.imshow(img_w[0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show()
-        plt.figure(3); plt.imshow(depth[0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show()
-        plt.figure(4); plt.imshow(depth_w[0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show()
-        plt.figure(5); plt.imshow(fw_val[0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show()
-        plt.figure(6); plt.imshow(iw_val[0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show()
-        plt.figure(7); plt.imshow(valid[0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show()
-
     """
     check_sizes(depth, "depth", "B1HW")
     check_sizes(pose, "pose", "B6")
     check_sizes(intrinsics, "intrinsics", "B33")
 
-    bs, _, hh, ww = depth.size()
-    depth_u = F.interpolate(depth, scale_factor=upscale).squeeze(1)
-    intrinsic_u = torch.cat((intrinsics[:, 0:2] * upscale, intrinsics[:, 2:]), dim=1)
+    batch_size, _, hh, ww = depth.size()
+    depth_upscaled = F.interpolate(depth, scale_factor=upscale).squeeze(1)
+    intrinsic_upscaled = torch.cat((intrinsics[:, 0:2] * upscale, intrinsics[:, 2:]), dim=1)
 
-    cam_coords = pixel2cam(depth_u, intrinsic_u.inverse())  # [B,3,uH,uW]
+    cam_coords = pixel2cam(depth_upscaled, intrinsic_upscaled.inverse())  # [B,3,uH,uW]
     pose_mat = pose_vec2mat(pose, rotation_mode)  # [B,3,4]
-    pcoords, Z = cam2pix_trans(cam_coords, pose_mat, intrinsics)  # [B,uH,uW,2], [B,1,uH,uW]
+    pix_coords, Z = cam2pixel_with_transform(cam_coords, pose_mat, intrinsics)  # [B,uH,uW,2], [B,1,uH,uW]
 
-    depth_w, fw_val = [], []
-    for coo, z in zip(pcoords, Z):
-        idx = coo.reshape(-1, 2).permute(1, 0).long()[[1, 0]]
+    depth_warped, forward_warp_valid_points = [], []
+    for pix_coord, z in zip(pix_coords, Z):
+        idx = pix_coord.reshape(-1, 2).permute(1, 0).long()[[1, 0]]
         val = z.reshape(-1)
         idx[0][idx[0] < 0] = hh
         idx[0][idx[0] > hh - 1] = hh
@@ -568,26 +564,26 @@ def forward_warp(img, depth, pose, intrinsics, upscale=None, rotation_mode="eule
         _idx, _val = coalesce(
             idx, 1 / val, m=hh + 1, n=ww + 1, op="max"
         )  # Cast an index with maximum-inverse-depth: we do NOT interpolate points! >> errors near boundary
-        depth_w.append(1 / torch.sparse.FloatTensor(_idx, _val, torch.Size([hh + 1, ww + 1])).to_dense()[:-1, :-1])
-        fw_val.append(1 - (torch.sparse.FloatTensor(_idx, _val, torch.Size([hh + 1, ww + 1])).to_dense()[:-1, :-1] == 0).float())
-        # pdb.set_trace()
-    depth_w = torch.stack(depth_w, dim=0)
-    fw_val = torch.stack(fw_val, dim=0)
-    depth_w[fw_val == 0] = 0
+        depth_warped.append(1 / torch.sparse.FloatTensor(_idx, _val, torch.Size([hh + 1, ww + 1])).to_dense()[:-1, :-1])
+        forward_warp_valid_points.append(
+            1 - (torch.sparse.FloatTensor(_idx, _val, torch.Size([hh + 1, ww + 1])).to_dense()[:-1, :-1] == 0).float()
+        )
+    depth_warped = torch.stack(depth_warped, dim=0)
+    forward_warp_valid_points = torch.stack(forward_warp_valid_points, dim=0)
+    depth_warped[forward_warp_valid_points == 0] = 0
 
-    aux_mat = torch.tensor([0, 0, 0, 1]).type_as(pose_mat).unsqueeze(0).unsqueeze(0).repeat(bs, 1, 1)  # [B,1,1]
+    aux_mat = torch.tensor([0, 0, 0, 1]).type_as(pose_mat).unsqueeze(0).unsqueeze(0).repeat(batch_size, 1, 1)  # [B,1,1]
     pose_mat_inv = torch.inverse(torch.cat([pose_mat, aux_mat], dim=1))  # [B,4,4]
     trans_vec = pose_mat_inv[:, :3, 3]
     euler_vec = mat2euler(pose_mat_inv[:, :3, :3])
     pose_inv = torch.cat([trans_vec, euler_vec], dim=1)
 
-    img_w, iw_val = inverse_warp(img, depth_w, pose_inv, intrinsics)
-    iw_val = iw_val.float().unsqueeze(1)
-    depth_w = depth_w.unsqueeze(1)
-    valid = fw_val.unsqueeze(1) * iw_val
-    # pdb.set_trace()
+    img_warped, inverse_warp_valid_points = inverse_warp(img, depth_warped, pose_inv, intrinsics)
+    inverse_warp_valid_points = inverse_warp_valid_points.float().unsqueeze(1)
+    depth_warped = depth_warped.unsqueeze(1)
+    valid = forward_warp_valid_points.unsqueeze(1) * inverse_warp_valid_points
 
-    return img_w * valid, depth_w * valid, valid
+    return img_warped * valid, depth_warped * valid, valid
 
 
 def cam2pixel_mof(cam_coords, proj_c2p_rot, proj_c2p_tr, padding_mode):
@@ -660,11 +656,11 @@ def cam2pixel_mof(cam_coords, proj_c2p_rot, proj_c2p_tr, padding_mode):
     return pixel_coords.reshape(bs, hh, ww, 2), Z.reshape(bs, 1, hh, ww), pixel_coords2.reshape(bs, hh, ww, 2)
 
 
-def inverse_warp_mof(img, depth, ref_depth, motion_field, intrinsics, padding_mode="zeros"):
+def inverse_warp_mof(src_img, depth, ref_depth, motion_field, intrinsics, padding_mode="zeros"):
     """
     Inverse warp a source image to the target image plane.
     Args:
-        img: the source image (where to sample pixels) -- [B, 3, H, W]
+        src_img: the source image (where to sample pixels) -- [B, 3, H, W]
         depth: depth map of the target image -- [B, 1, H, W]
         ref_depth: the source depth map (where to sample depth) -- [B, 1, H, W]
         motion_field: 6DoF pose parameters from target to source -- [B, 6, H, W]
@@ -675,38 +671,38 @@ def inverse_warp_mof(img, depth, ref_depth, motion_field, intrinsics, padding_mo
         projected_depth: sampled depth from source image
         computed_depth: computed depth of source image using the target depth
     """
-    check_sizes(img, "img", "B3HW")
+    check_sizes(src_img, "img", "B3HW")
     check_sizes(depth, "depth", "B1HW")
     check_sizes(ref_depth, "ref_depth", "B1HW")
     check_sizes(motion_field, "motion_field", "B6HW")
     check_sizes(intrinsics, "intrinsics", "B33")
+    """
+    proj_cam_to_src_pixel: tgtカメラ座標をsrcの画像座標に．つまりt+1(tgt)時刻の状態をsrcの位置(時刻tにいた位置)でみたときの様子
+    computed_depthは時刻t+1でのオブジェクトや背景を，tの位置で見たときのDepth(背景は変わってないはず)．
+    projected_depthは時刻tでのdepthをオブジェクトや背景ごとに，t+1の位置へとワープさせたときのDepth.
 
-    bs, _, hh, ww = img.size()
+    computed_depthはD_(t+1)を使用し，projected_depthはD_(t)を使用．どちらも時刻tの座標から見た時刻t+1における深度
+    """
 
-    cam_coords = pixel2cam(depth.squeeze(1), intrinsics.inverse())  # [B,3,H,W]
+    batch_size, _, hh, ww = src_img.size()
+
+    cam_coords = pixel2cam(depth.squeeze(1), intrinsics.inverse())  # [B,3,H,W] ("3"は[x,y,1],[X,Y,Z]の次元数)
 
     transform_field = pose_mof2mat(motion_field)  # [B, 3, 4, 256, 832]
-    transform_field = transform_field.permute(0, 3, 4, 1, 2).reshape(bs, -1, 3, 4)  # [B, N, 3, 4]
+    transform_field = transform_field.permute(0, 3, 4, 1, 2).reshape(batch_size, -1, 3, 4)  # [B, N, 3, 4]
 
     # Get projection matrix for tgt camera frame to source pixel frame
-    proj_cam_to_src_pixel = intrinsics.reshape(bs, 1, 3, 3) @ transform_field  # [B, N, 3, 4]
+    proj_cam_to_src_pixel = intrinsics.reshape(batch_size, 1, 3, 3) @ transform_field  # [B, N, 3, 4]
 
-    rot, tr = proj_cam_to_src_pixel[:, :, :, :3], proj_cam_to_src_pixel[:, :, :, -1:]
-    rot = rot.reshape(bs, hh, ww, 3, 3).permute(0, 3, 4, 1, 2)  # [8, 3, 3, 256, 832]
-    tr = tr.reshape(bs, hh, ww, 3, 1).permute(0, 3, 4, 1, 2)  # [8, 3, 1, 256, 832]
+    rot, translation = proj_cam_to_src_pixel[:, :, :, :3], proj_cam_to_src_pixel[:, :, :, -1:]
+    rot = rot.reshape(batch_size, hh, ww, 3, 3).permute(0, 3, 4, 1, 2)  # [8, 3, 3, 256, 832]
+    translation = translation.reshape(batch_size, hh, ww, 3, 1).permute(0, 3, 4, 1, 2)  # [8, 3, 1, 256, 832]
 
-    # pdb.set_trace()
-    """
-        plt.close('all')
-        plt.figure(1); plt.imshow(rot[0,0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show();
-        plt.figure(2); plt.imshow(tr[0,0,0].detach().cpu()); plt.colorbar(); plt.ion(); plt.show();
-
-    """
-    src_pixel_coords, computed_depth, flow_grid = cam2pixel_mof(cam_coords, rot, tr, padding_mode)  # [B,H,W,2]
+    src_pixel_coords, computed_depth, flow_grid = cam2pixel_mof(cam_coords, rot, translation, padding_mode)  # [B,H,W,2]
     if np.array(torch.__version__[:3]).astype(float) >= 1.3:
-        projected_img = F.grid_sample(img, src_pixel_coords, padding_mode=padding_mode, align_corners=False)
+        projected_img = F.grid_sample(src_img, src_pixel_coords, padding_mode=padding_mode, align_corners=False)
     else:
-        projected_img = F.grid_sample(img, src_pixel_coords, padding_mode=padding_mode)
+        projected_img = F.grid_sample(src_img, src_pixel_coords, padding_mode=padding_mode)
 
     valid_points = src_pixel_coords.abs().max(dim=-1)[0] <= 1
     valid_mask = valid_points.unsqueeze(1).float()
@@ -716,7 +712,7 @@ def inverse_warp_mof(img, depth, ref_depth, motion_field, intrinsics, padding_mo
     else:
         projected_depth = F.grid_sample(ref_depth, src_pixel_coords, padding_mode=padding_mode)
 
-    mgrid_np = np.expand_dims(np.mgrid[0:ww, 0:hh].transpose(2, 1, 0).astype(np.float32), 0).repeat(bs, axis=0)
+    mgrid_np = np.expand_dims(np.mgrid[0:ww, 0:hh].transpose(2, 1, 0).astype(np.float32), 0).repeat(batch_size, axis=0)
     mgrid = torch.from_numpy(mgrid_np).cuda()  # [B,H,W,2]
     flow = (flow_grid - mgrid).permute(0, 3, 1, 2)
 

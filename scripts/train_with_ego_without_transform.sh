@@ -5,7 +5,7 @@
 ROOT_DIR=/home/gkinoshita/workspace/Insta-DM
 TRAIN_DIR=${ROOT_DIR}/kitti_odometry
 
-DEST_DIR_NAME="first_model"
+DEST_DIR_NAME="without_transform"
 
 ### KITTI model ###
 PRETRAINED=${ROOT_DIR}/pretrained/KITTI
@@ -13,7 +13,7 @@ PRETRAINED=${ROOT_DIR}/pretrained/KITTI
 ############################################################################################################
 
 ### For training ###
-CUDA_VISIBLE_DEVICES=0,1,2 python train_with_ego.py $TRAIN_DIR \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4 python train_with_ego_without_transform.py $TRAIN_DIR \
 -b 4 -p 2.0 -c 1.0 -s 0.1 -o 0.02 -mc 0.1 -mni 2 \
 --epoch-size 1000 \
 --with-ssim --with-mask --with-auto-mask \

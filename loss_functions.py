@@ -10,19 +10,23 @@ from rigid_warp import euler2mat, flow_warp, inverse_warp_mof, pose_mof2mat
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
-# : 回転行列の掛け算が単位行列になるという制約を追加する
-def ego_pose_loss(batch_pred_pose: torch.Tensor, gt_rot_mats: torch.Tensor, gt_translation_vecs: torch.Tensor) -> tuple[torch.Tensor]:
-    # pred_pose: [t1, t2, t3, r1, r2, r3]
-    # gt_translation_vec: [t1, t2, t3] (横ベクトル)
+# HACK: 回転行列の掛け算が単位行列になるという制約を追加する
+def ego_pose_loss(
+    batch_pred_pose: torch.Tensor, gt_rot_mats: torch.Tensor, gt_translation_vecs: torch.Tensor
+) -> tuple[torch.Tensor]:
+    # pred_pose: B x [t1, t2, t3, r1, r2, r3]
+    # gt_translation_vecs: B x [t1, t2, t3] (横ベクトル)
     # rotation_loss = F.mse_loss(
     #     torch.flatten(euler2mat(batch_pred_pose[:, 3:]), start_dim=1), torch.flatten(gt_rot_mats, start_dim=1), reduction="mean"
     # )  # 回転行列の各要素ごとのMSE
     rotation_loss = F.l1_loss(
-        torch.flatten(euler2mat(batch_pred_pose[:, 3:]), start_dim=1), torch.flatten(gt_rot_mats, start_dim=1), reduction="sum"
+        torch.flatten(euler2mat(batch_pred_pose[:, 3:]), start_dim=1),
+        torch.flatten(gt_rot_mats, start_dim=1),
+        reduction="sum",
     )  # 回転行列の各要素ごとのL1 loss(2乗誤差だと値が小さすぎて消えてしまう)
     translation_loss = torch.linalg.norm(gt_translation_vecs - batch_pred_pose[:, :3], dim=1).mean()  # 並進ベクトルのL2Normのロス
     direction_loss = -F.cosine_similarity(gt_translation_vecs, batch_pred_pose[:, :3]).mean()  # 並進ベクトル方向のロス
-    return translation_loss + rotation_loss + direction_loss
+    return translation_loss, rotation_loss, direction_loss
 
 
 class SSIM(nn.Module):
@@ -78,22 +82,29 @@ def compute_photo_and_geometry_loss(
     with_only_obj,
     tgt_obj_masks,
     ref_obj_masks,
-    vmasks_fwd,
-    vmasks_bwd,
+    valid_masks_fwd,
+    valid_masks_bwd,
 ):
 
     photo_loss = 0
     geometry_loss = 0
 
-    r2t_imgs, t2r_imgs = [], []
-    r2t_flows, t2r_flows = [], []
-    r2t_diffs, t2r_diffs = [], []
-    r2t_vals, t2r_vals = [], []
+    ref2tgt_imgs, tgt2ref_imgs = [], []
+    ref2tgt_flows, tgt2ref_flows = [], []
+    ref2tgt_diffs, tgt2ref_diffs = [], []
+    ref2tgt_valids, tgt2ref_valids = [], []
 
-    for ref_img, ref_depth, mf_fwd, mf_bwd, tgt_obj_mask, ref_obj_mask, vmask_fwd, vmask_bwd in zip(
-        ref_imgs, ref_depths, motion_fields_fwd, motion_fields_bwd, tgt_obj_masks, ref_obj_masks, vmasks_fwd, vmasks_bwd
+    for ref_img, ref_depth, mf_fwd, mf_bwd, tgt_obj_mask, ref_obj_mask, valid_mask_fwd, valid_mask_bwd in zip(
+        ref_imgs,
+        ref_depths,
+        motion_fields_fwd,
+        motion_fields_bwd,
+        tgt_obj_masks,
+        ref_obj_masks,
+        valid_masks_fwd,
+        valid_masks_bwd,
     ):
-        photo_loss1, geometry_loss1, r2t_img, tgt_comp_depth, r2t_flow, r2t_diff, r2t_val = compute_pairwise_loss(
+        photo_loss1, geometry_loss1, ref2tgt_img, ref2tgt_flow, ref2tgt_diff, ref2tgt_valid = compute_pairwise_loss(
             tgt_img,
             ref_img,
             tgt_depth,
@@ -106,9 +117,9 @@ def compute_photo_and_geometry_loss(
             padding_mode,
             with_only_obj,
             tgt_obj_mask,
-            vmask_fwd.detach(),
+            valid_mask_fwd.detach(),
         )
-        photo_loss2, geometry_loss2, t2r_img, ref_comp_depth, t2r_flow, t2r_diff, t2r_val = compute_pairwise_loss(
+        photo_loss2, geometry_loss2, tgt2ref_img, tgt2ref_flow, tgt2ref_diff, tgt2ref_valid = compute_pairwise_loss(
             ref_img,
             tgt_img,
             ref_depth,
@@ -121,21 +132,32 @@ def compute_photo_and_geometry_loss(
             padding_mode,
             with_only_obj,
             ref_obj_mask,
-            vmask_bwd.detach(),
+            valid_mask_bwd.detach(),
         )
-        r2t_imgs.append(r2t_img)
-        t2r_imgs.append(t2r_img)
-        r2t_flows.append(r2t_flow)
-        t2r_flows.append(t2r_flow)
-        r2t_diffs.append(r2t_diff)
-        t2r_diffs.append(t2r_diff)
-        r2t_vals.append(r2t_val)
-        t2r_vals.append(t2r_val)
+        ref2tgt_imgs.append(ref2tgt_img)
+        tgt2ref_imgs.append(tgt2ref_img)
+        ref2tgt_flows.append(ref2tgt_flow)
+        tgt2ref_flows.append(tgt2ref_flow)
+        ref2tgt_diffs.append(ref2tgt_diff)
+        tgt2ref_diffs.append(tgt2ref_diff)
+        ref2tgt_valids.append(ref2tgt_valid)
+        tgt2ref_valids.append(tgt2ref_valid)
 
         photo_loss += photo_loss1 + photo_loss2
         geometry_loss += geometry_loss1 + geometry_loss2
 
-    return photo_loss, geometry_loss, r2t_imgs, t2r_imgs, r2t_flows, t2r_flows, r2t_diffs, t2r_diffs, r2t_vals, t2r_vals
+    return (
+        photo_loss,
+        geometry_loss,
+        ref2tgt_imgs,
+        tgt2ref_imgs,
+        ref2tgt_flows,
+        tgt2ref_flows,
+        ref2tgt_diffs,
+        tgt2ref_diffs,
+        ref2tgt_valids,
+        tgt2ref_valids,
+    )
 
 
 def compute_pairwise_loss(
@@ -151,9 +173,9 @@ def compute_pairwise_loss(
     padding_mode,
     with_only_obj,
     obj_mask,
-    vmask,
+    vmask,  # 関数内部の変数としてvalid_maskが使われているので，変数名を変更してはいけない．
 ):
-    ref_img_warped, valid_mask, projected_depth, computed_depth, r2t_flow = inverse_warp_mof(
+    ref_img_warped, valid_mask, projected_depth, computed_depth, ref2tgt_flow = inverse_warp_mof(
         ref_img, tgt_depth, ref_depth, motion_field, intrinsic, padding_mode
     )
 
@@ -161,7 +183,9 @@ def compute_pairwise_loss(
     diff_depth = ((computed_depth - projected_depth).abs() / (computed_depth + projected_depth)).clamp(0, 1)
 
     if with_auto_mask:
-        auto_mask = (diff_img.mean(dim=1, keepdim=True) < (tgt_img - ref_img).abs().mean(dim=1, keepdim=True)).float() * valid_mask
+        auto_mask = (
+            diff_img.mean(dim=1, keepdim=True) < (tgt_img - ref_img).abs().mean(dim=1, keepdim=True)
+        ).float() * valid_mask
         valid_mask = auto_mask
 
     if with_ssim:
@@ -181,7 +205,7 @@ def compute_pairwise_loss(
     reconstruction_loss = mean_on_mask(diff_img, out_val)
     geometry_consistency_loss = mean_on_mask(diff_depth, out_val)
 
-    return reconstruction_loss, geometry_consistency_loss, ref_img_warped, computed_depth, r2t_flow, diff_depth, out_val
+    return reconstruction_loss, geometry_consistency_loss, ref_img_warped, ref2tgt_flow, diff_depth, out_val
 
 
 def compute_smooth_loss(tgt_depth, tgt_img, ref_depths, ref_imgs):
@@ -218,6 +242,103 @@ def compute_smooth_loss(tgt_depth, tgt_img, ref_depths, ref_imgs):
     return loss
 
 
+def compute_obj_category_size_constraint_loss(
+    height_priors,
+    height_var_priors,
+    tgtD,
+    seq_tgtMs,
+    seq_tgt_labels,
+    seq_refDs,
+    seq_refMs,
+    seq_ref_labels,
+    batch_intrinsics,
+    max_num_insts,
+    seq_num_insts,
+):
+    """
+    Reference: Struct2Depth (AAAI'19), https://github.com/tensorflow/models/blob/archive/research/struct2depth/model.py
+    args:
+        D_avg, D_obj, H_obj, D_app: tensor([d1, d2, d3, ... dn], device='cuda:0')
+        num_inst: [n1, n2, ...]
+        intrinsics.shape: torch.Size([B, 3, 3])
+    """
+    batch_size, _, hh, ww = tgtD.size()
+
+    loss = torch.tensor(0.0).cuda()
+
+    for batch_tgtM, batch_tgt_labels, batch_refD, batch_refM, batch_ref_labels, batch_num_inst in zip(
+        seq_tgtMs, seq_tgt_labels, seq_refDs, seq_refMs, seq_ref_labels, seq_num_insts
+    ):
+        if sum(batch_num_inst) != 0:
+            fy_rep = batch_intrinsics[:, 1, 1].repeat_interleave(max_num_insts, dim=0)
+
+            ### tgt-frame ###
+            tgtD_rep = tgtD.repeat_interleave(max_num_insts, dim=0)
+            batch_tgtD_avg = tgtD_rep.mean(dim=[1, 2, 3])
+            tgtM_rep = batch_tgtM[:, 1:].reshape(-1, 1, hh, ww)
+            batch_tgtD_obj = (tgtD_rep * tgtM_rep).sum(dim=[1, 2, 3]) / tgtM_rep.sum(dim=[1, 2, 3]).clamp(min=1e-9)
+            tgtM_idx = np.where(tgtM_rep.detach().cpu().numpy() == 1)
+            batch_tgtH_obj = torch.tensor(
+                [
+                    tgtM_idx[2][tgtM_idx[0] == obj].max() - tgtM_idx[2][tgtM_idx[0] == obj].min()
+                    if (tgtM_idx[0] == obj).sum() != 0
+                    else 0
+                    for obj in range(tgtM_rep.size(0))
+                ]
+            ).type_as(tgtD)
+
+            batch_tgt_val = (batch_tgtD_obj > 0) * (batch_tgtH_obj > 0)
+
+            batch_tgt_fy = fy_rep[batch_tgt_val]
+            batch_tgtD_avg = batch_tgtD_avg[
+                batch_tgt_val
+            ].detach()  # d_avg.detach() to prevent increasing depth in the sky.
+            batch_tgtD_obj = batch_tgtD_obj[batch_tgt_val]
+            batch_tgtH_obj = batch_tgtH_obj[batch_tgt_val]
+            batch_tgt_labels = batch_tgt_labels[batch_tgt_val]
+            # TODO: batch_tgt_labelsの中に-1(matchなしカテゴリー)が排除できているのか確認
+            batch_tgtD_approx = (batch_tgt_fy * height_priors[batch_tgt_labels]) / batch_tgtH_obj
+
+            # loss_tgt = torch.abs((batch_tgtD_obj - batch_tgtD_approx) / batch_tgtD_avg).sum() / batch_size
+            loss_tgt = (
+                F.gaussian_nll_loss(input=batch_tgtD_approx, target=batch_tgtD_obj, var=height_var_priors, eps=0.001)
+                / batch_size
+            )
+
+            ### ref-frame ###
+            refD_rep = batch_refD.repeat_interleave(max_num_insts, dim=0)
+            batch_refD_avg = refD_rep.mean(dim=[1, 2, 3])
+            refM_rep = batch_refM[:, 1:].reshape(-1, 1, hh, ww)
+            batch_refD_obj = (refD_rep * refM_rep).sum(dim=[1, 2, 3]) / refM_rep.sum(dim=[1, 2, 3]).clamp(min=1e-9)
+            refM_idx = np.where(refM_rep.detach().cpu().numpy() == 1)
+            batch_refH_obj = torch.tensor(
+                [
+                    refM_idx[2][refM_idx[0] == obj].max() - refM_idx[2][refM_idx[0] == obj].min()
+                    if (refM_idx[0] == obj).sum() != 0
+                    else 0
+                    for obj in range(refM_rep.size(0))
+                ]
+            ).type_as(batch_refD)
+            batch_ref_val = (batch_refD_obj > 0) * (batch_refH_obj > 0)
+            batch_ref_fy = fy_rep[batch_ref_val]
+            batch_refD_avg = batch_refD_avg[
+                batch_ref_val
+            ].detach()  # d_avg.detach() to prevent increasing depth in the sky.
+            batch_refD_obj = batch_refD_obj[batch_ref_val]
+            batch_refH_obj = batch_refH_obj[batch_ref_val]
+            batch_ref_labels = batch_ref_labels[batch_ref_val]
+            # TODO: 上記と同様
+            # batch_refD_approx = (batch_ref_fy * height_priors[batch_ref_labels]) / batch_refH_obj
+            batch_refD_approx = (
+                F.gaussian_nll_loss(input=batch_refD_approx, target=batch_refD_obj, var=height_var_priors, eps=0.001)
+                / batch_size
+            )
+
+            loss_ref = torch.abs((batch_refD_obj - batch_refD_approx) / batch_refD_avg).sum() / batch_size
+            loss += (loss_tgt + loss_ref) / 2
+    return loss
+
+
 def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, intrinsics, max_num_insts, num_insts):
     """
     Reference: Struct2Depth (AAAI'19), https://github.com/tensorflow/models/blob/archive/research/struct2depth/model.py
@@ -242,7 +363,9 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
             tgtM_idx = np.where(tgtM_rep.detach().cpu().numpy() == 1)
             tgtH_obj = torch.tensor(
                 [
-                    tgtM_idx[2][tgtM_idx[0] == obj].max() - tgtM_idx[2][tgtM_idx[0] == obj].min() if (tgtM_idx[0] == obj).sum() != 0 else 0
+                    tgtM_idx[2][tgtM_idx[0] == obj].max() - tgtM_idx[2][tgtM_idx[0] == obj].min()
+                    if (tgtM_idx[0] == obj).sum() != 0
+                    else 0
                     for obj in range(tgtM_rep.size(0))
                 ]
             ).type_as(tgtD)
@@ -255,7 +378,9 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
             tgtH_obj = tgtH_obj[tgt_val]
             tgtD_app = (tgt_fy * height_prior) / tgtH_obj
 
-            loss_tgt = torch.abs((tgtD_obj - tgtD_app) / tgtD_avg).sum() / torch.abs((tgtD_obj - tgtD_app) / tgtD_avg).size(0)
+            loss_tgt = torch.abs((tgtD_obj - tgtD_app) / tgtD_avg).sum() / torch.abs(
+                (tgtD_obj - tgtD_app) / tgtD_avg
+            ).size(0)
 
             ### ref-frame ###
             refD_rep = refD.repeat_interleave(max_num_insts, dim=0)
@@ -265,7 +390,9 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
             refM_idx = np.where(refM_rep.detach().cpu().numpy() == 1)
             refH_obj = torch.tensor(
                 [
-                    refM_idx[2][refM_idx[0] == obj].max() - refM_idx[2][refM_idx[0] == obj].min() if (refM_idx[0] == obj).sum() != 0 else 0
+                    refM_idx[2][refM_idx[0] == obj].max() - refM_idx[2][refM_idx[0] == obj].min()
+                    if (refM_idx[0] == obj).sum() != 0
+                    else 0
                     for obj in range(refM_rep.size(0))
                 ]
             ).type_as(refD)
@@ -278,14 +405,18 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
             refH_obj = refH_obj[ref_val]
             refD_app = (ref_fy * height_prior) / refH_obj
 
-            loss_ref = torch.abs((refD_obj - refD_app) / refD_avg).sum() / torch.abs((refD_obj - refD_app) / refD_avg).size(0)
+            loss_ref = torch.abs((refD_obj - refD_app) / refD_avg).sum() / torch.abs(
+                (refD_obj - refD_app) / refD_avg
+            ).size(0)
 
             loss += 1 / 2 * (loss_tgt + loss_ref)
 
     return loss
 
 
-def compute_mof_consistency_loss(tgt_mofs, ref_mofs, r2t_flows, t2r_flows, r2t_diffs, t2r_diffs, r2t_vals, t2r_vals, alpha=10, thresh=0.1):
+def compute_mof_consistency_loss(
+    tgt_mofs, ref_mofs, r2t_flows, t2r_flows, r2t_diffs, t2r_diffs, r2t_vals, t2r_vals, alpha=10, thresh=0.1
+):
     """
     Reference: Depth from Videos in the Wild (ICCV'19)
     Args:
@@ -387,7 +518,6 @@ def mean_on_mask(diff, valid_mask):
 def compute_errors(gt, pred, med_scale=None):
     abs_diff, abs_rel, sq_rel, a1, a2, a3 = 0, 0, 0, 0, 0, 0
     batch_size = gt.size(0)
-
     """
         crop used by Garg ECCV16 to reproduce Eigen NIPS14 results
         construct a mask of False values, with the same size as target

@@ -11,7 +11,6 @@ import argparse
 import csv
 import datetime
 import os
-import pdb
 import time
 import warnings
 from pathlib import Path
@@ -26,7 +25,7 @@ from tensorboardX import SummaryWriter
 
 import custom_transforms
 import models
-from datasets.sequence_folders import SequenceFolder
+from datasets.my_sequence_folders import SequenceFolderWithEgoPose
 from logger import AverageMeter, TermLogger
 from loss_functions import (
     compute_errors,
@@ -41,7 +40,7 @@ from utils import save_checkpoint
 
 warnings.simplefilter("ignore", UserWarning)
 
-# TODO: 推論時はこのサイトの形式で出力するhttps://github.com/Huangying-Zhan/kitti-odom-eval
+# 推論時はこのサイトの形式で出力するhttps://github.com/Huangying-Zhan/kitti-odom-eval
 
 parser = argparse.ArgumentParser(
     description="Learning Monocular Depth in Dynamic Scenes via Instance-Aware Projection Consistency (KITTI and CityScapes)",
@@ -72,43 +71,101 @@ parser.add_argument(
     " border will only null gradients of the coordinate outside (x or y)",
 )
 
-# TODO: num_workersを変更する
-parser.add_argument("-j", "--workers", default=8, type=int, metavar="N", help="number of data loading workers")
+import os
+
+parser.add_argument(
+    "-j", "--workers", default=os.cpu_count(), type=int, metavar="N", help="number of data loading workers"
+)
 parser.add_argument("-b", "--batch-size", default=4, type=int, metavar="N", help="mini-batch size")
 parser.add_argument("--epochs", default=200, type=int, metavar="N", help="number of total epochs to run")
-parser.add_argument("--epoch-size", default=0, type=int, metavar="N", help="manual epoch size (will match dataset size if not set)")
-parser.add_argument("--disp-lr", "--disp-learning-rate", default=1e-4, type=float, metavar="LR", help="initial learning rate for DispResNet")
-parser.add_argument("--ego-lr", "--ego-learning-rate", default=1e-4, type=float, metavar="LR", help="initial learning rate for EgoPoseNet")
-parser.add_argument("--obj-lr", "--obj-learning-rate", default=1e-4, type=float, metavar="LR", help="initial learning rate for ObjPoseNet")
-parser.add_argument("--momentum", default=0.9, type=float, metavar="M", help="momentum for sgd, alpha parameter for adam")
+parser.add_argument(
+    "--epoch-size", default=0, type=int, metavar="N", help="manual epoch size (will match dataset size if not set)"
+)
+parser.add_argument(
+    "--disp-lr",
+    "--disp-learning-rate",
+    default=1e-4,
+    type=float,
+    metavar="LR",
+    help="initial learning rate for DispResNet",
+)
+parser.add_argument(
+    "--ego-lr",
+    "--ego-learning-rate",
+    default=1e-4,
+    type=float,
+    metavar="LR",
+    help="initial learning rate for EgoPoseNet",
+)
+parser.add_argument(
+    "--obj-lr",
+    "--obj-learning-rate",
+    default=1e-4,
+    type=float,
+    metavar="LR",
+    help="initial learning rate for ObjPoseNet",
+)
+parser.add_argument(
+    "--momentum", default=0.9, type=float, metavar="M", help="momentum for sgd, alpha parameter for adam"
+)
 parser.add_argument("--beta", default=0.999, type=float, metavar="M", help="beta parameters for adam")
 parser.add_argument("--weight-decay", "--wd", default=0, type=float, metavar="W", help="weight decay")
 parser.add_argument("--print-freq", default=10, type=int, metavar="N", help="print frequency")
 parser.add_argument("--save-freq", default=3, type=int, metavar="N", help="save frequency")
-parser.add_argument("--resnet-layers", type=int, default=18, choices=[18, 50], help="number of ResNet layers for depth estimation.")
+parser.add_argument(
+    "--resnet-layers", type=int, default=18, choices=[18, 50], help="number of ResNet layers for depth estimation."
+)
 parser.add_argument("--with-pretrained", type=int, default=1, help="with or without imagenet pretrained for resnet")
 parser.add_argument("--resnet-pretrained", action="store_true", help="pretrained from resnet model or not")
 parser.add_argument("--seed", default=0, type=int, help="seed for random functions, and network initialization")
-parser.add_argument("--log-summary", default="progress_log_summary.csv", metavar="PATH", help="csv where to save per-epoch train and valid stats")
-parser.add_argument("--log-full", default="progress_log_full.csv", metavar="PATH", help="csv where to save per-gradient descent train stats")
+parser.add_argument(
+    "--log-summary",
+    default="progress_log_summary.csv",
+    metavar="PATH",
+    help="csv where to save per-epoch train and valid stats",
+)
+parser.add_argument(
+    "--log-full",
+    default="progress_log_full.csv",
+    metavar="PATH",
+    help="csv where to save per-gradient descent train stats",
+)
 
-parser.add_argument("-p", "--photo-loss-weight", type=float, help="weight for photometric loss", metavar="W", default=2.0)
-parser.add_argument("-c", "--geometry-consistency-weight", type=float, help="weight for depth consistency loss", metavar="W", default=1.0)
-parser.add_argument("-s", "--smooth-loss-weight", type=float, help="weight for disparity smoothness loss", metavar="W", default=0.1)
-parser.add_argument("-o", "--scale-loss-weight", type=float, help="weight for object scale loss", metavar="W", default=0.02)
+parser.add_argument(
+    "-p", "--photo-loss-weight", type=float, help="weight for photometric loss", metavar="W", default=2.0
+)
+parser.add_argument(
+    "-c",
+    "--geometry-consistency-weight",
+    type=float,
+    help="weight for depth consistency loss",
+    metavar="W",
+    default=1.0,
+)
+parser.add_argument(
+    "-s", "--smooth-loss-weight", type=float, help="weight for disparity smoothness loss", metavar="W", default=0.1
+)
+parser.add_argument(
+    "-o", "--scale-loss-weight", type=float, help="weight for object scale loss", metavar="W", default=0.02
+)
 parser.add_argument(
     "-mc", "--mof-consistency-loss-weight", type=float, help="weight for mof consistency loss", metavar="W", default=0.1
-)  # mofって何？photometric lossのうち，SSIMについてる定数項？
-parser.add_argument("-hp", "--height-loss-weight", type=float, help="weight for height prior loss", metavar="W", default=0.0)
-parser.add_argument("-dm", "--depth-loss-weight", type=float, help="weight for depth mean loss", metavar="W", default=0.0)  # HACK: これなんのためにある？
+)
+parser.add_argument("--pose-weight", type=float, help="weight for ego pose loss", metavar="W", default=0.05)
 
 parser.add_argument("--with-auto-mask", action="store_true", help="with the the mask for stationary points")
 parser.add_argument("--with-ssim", action="store_true", help="with ssim or not")
-parser.add_argument("--with-mask", action="store_true", help="with the the mask for moving objects and occlusions or not")
+parser.add_argument(
+    "--with-mask", action="store_true", help="with the the mask for moving objects and occlusions or not"
+)
 parser.add_argument("--with-only-obj", action="store_true", help="with only obj mask")
 
 parser.add_argument(
-    "--dest-dir", dest="dest_dir", type=Path, required=True, help="name of the experiment, checkpoints are stored in checkpoints/dest_dir"
+    "--dest-dir-name",
+    dest="dest_dir_name",
+    type=Path,
+    required=True,
+    help="name of the experiment, checkpoints are stored in checkpoints/dest_dir_name",
 )
 parser.add_argument("--debug-mode", action="store_true", help="run codes with debugging mode or not")
 parser.add_argument("--no-shuffle", action="store_true", help="feed data without shuffling")
@@ -123,31 +180,38 @@ device_val = torch.device("cuda:1") if torch.cuda.is_available() else torch.devi
 
 
 def main():
-    print("=> PyTorch version: " + torch.__version__ + " || CUDA_VISIBLE_DEVICES: " + os.environ["CUDA_VISIBLE_DEVICES"])
+    print(
+        "=> PyTorch version: " + torch.__version__ + " || CUDA_VISIBLE_DEVICES: " + os.environ["CUDA_VISIBLE_DEVICES"]
+    )
 
     args = parser.parse_args()
 
     timestamp = datetime.datetime.now().strftime("%m-%d-%H:%M")
     if args.debug_mode:
-        args.save_path = "checkpoints" / Path("debug") / timestamp
+        args.save_dir = args.data_dir.parent / "checkpoints/debug" / timestamp
     else:
-        args.save_path = "checkpoints" / args.dest_dir / timestamp
-    print("=> will save everything to {}".format(args.save_path))
-    args.save_path.mkdir(parents=True, exist_ok=True)
+        args.save_dir = args.data_dir.parent / Path("checkpoints") / args.dest_dir_name / timestamp
+    print("=> will save everything to {}".format(args.save_dir))
+    args.save_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    tf_writer = SummaryWriter(args.save_path)
+    tf_writer = SummaryWriter(args.save_dir)
 
     # Data loading
-    normalize = custom_transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    normalize = custom_transforms.NormalizeWithEgoPose(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 
-    train_transform = custom_transforms.Compose(
-        [custom_transforms.RandomHorizontalFlip(), custom_transforms.RandomScaleCrop(), custom_transforms.ArrayToTensor(), normalize]
+    train_transform = custom_transforms.ComposeWithEgoPose(
+        [
+            custom_transforms.RandomHorizontalFlipWithEgoPose(),
+            custom_transforms.RandomScaleCropWithEgoPose(),
+            custom_transforms.ArrayToTensorWithEgoPose(),
+            normalize,
+        ]
     )
-    valid_transform = custom_transforms.Compose([custom_transforms.ArrayToTensor(), normalize])
+    valid_transform = custom_transforms.ComposeWithEgoPose([custom_transforms.ArrayToTensorWithEgoPose(), normalize])
 
     print("=> fetching scenes from '{}'".format(args.data_dir))
-    train_set = SequenceFolder(
+    train_set = SequenceFolderWithEgoPose(
         root_dir=args.data_dir,
         is_train=True,
         seed=args.seed,
@@ -158,7 +222,7 @@ def main():
 
     # if no GT is available (e.g., Cityscapes), Validation set is the same type as training set to measure photometric loss from warping
     # GTがあればGTを使ってValidationデータを評価するが，なければ自己教師での損失でValidationを評価する
-    val_set = SequenceFolder(
+    val_set = SequenceFolderWithEgoPose(
         root_dir=args.data_dir,
         is_train=False,
         seed=args.seed,
@@ -167,12 +231,21 @@ def main():
         transform=valid_transform,
         proportion=0.1,
     )
-    print("=> {} samples found in training set || {} samples found in validation set".format(len(train_set), len(val_set)))
+    print(
+        "=> {} samples found in training set || {} samples found in validation set".format(len(train_set), len(val_set))
+    )
 
     train_loader = torch.utils.data.DataLoader(
-        train_set, batch_size=args.batch_size, shuffle=not (args.debug_mode), num_workers=args.workers, pin_memory=True
+        train_set,
+        batch_size=args.batch_size,
+        shuffle=not (args.debug_mode),
+        num_workers=args.workers,
+        pin_memory=True,
+        drop_last=True,
     )
-    val_loader = torch.utils.data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
+    val_loader = torch.utils.data.DataLoader(
+        val_set, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, drop_last=True
+    )
 
     if args.epoch_size == 0:
         args.epoch_size = len(train_loader)
@@ -207,17 +280,31 @@ def main():
 
     optimizer = torch.optim.Adam(optim_params, betas=(args.momentum, args.beta), weight_decay=args.weight_decay)
 
-    with open(args.save_path / args.log_summary, "w") as csvfile:
+    with open(args.save_dir / args.log_summary, "w") as csvfile:
         csv_summary = csv.writer(csvfile, delimiter="\t")
         csv_summary.writerow(["train_loss", "validation_loss"])
 
-    with open(args.save_path / args.log_full, "w") as csvfile:
+    with open(args.save_dir / args.log_full, "w") as csvfile:
         csv_full = csv.writer(csvfile, delimiter="\t")
         csv_full.writerow(
-            ["photo_loss", "geometry_loss", "smooth_loss", "scale_loss", "mof_consistency_loss", "height_loss", "depth_loss", "train_loss"]
+            [
+                "photo_loss",
+                "geometry_loss",
+                "smooth_loss",
+                "scale_loss",
+                "mof_consistency_loss",
+                "height_loss",
+                "depth_loss",
+                "translation_loss",
+                "rotation_loss",
+                "direction_loss",
+                "train_loss",
+            ]
         )
 
-    logger = TermLogger(n_epochs=args.epochs, train_size=min(len(train_loader), args.epoch_size), valid_size=len(val_loader))
+    logger = TermLogger(
+        n_epochs=args.epochs, train_size=min(len(train_loader), args.epoch_size), valid_size=len(val_loader)
+    )
     logger.epoch_bar.start()
 
     for epoch in range(args.epochs):
@@ -225,7 +312,9 @@ def main():
 
         ### train for one epoch ###
         logger.reset_train_bar()
-        train_loss = train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, args.epoch_size, logger, tf_writer)
+        train_loss = train(
+            args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, args.epoch_size, logger, tf_writer
+        )
         logger.train_writer.write(" * Avg Loss : {:.3f}".format(train_loss))
 
         ### evaluate on validation set ###
@@ -251,14 +340,15 @@ def main():
         save_checkpoint(
             epoch,
             args.save_freq,
-            args.save_path,
+            args.save_dir,
             {"epoch": epoch + 1, "state_dict": disp_net.module.state_dict()},
             {"epoch": epoch + 1, "state_dict": ego_pose_net.module.state_dict()},
             {"epoch": epoch + 1, "state_dict": obj_pose_net.module.state_dict()},
+            {"epoch": epoch + 1, "state_dict": optimizer.state_dict()},
             is_best,
         )
 
-        with open(args.save_path / args.log_summary, "a") as csvfile:
+        with open(args.save_dir / args.log_summary, "a") as csvfile:
             csv_summary = csv.writer(csvfile, delimiter="\t")
             csv_summary.writerow([train_loss, decisive_error])
     logger.epoch_bar.finish()
@@ -273,8 +363,8 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     np.set_printoptions(suppress=True)
 
     w1, w2, w3 = args.photo_loss_weight, args.geometry_consistency_weight, args.smooth_loss_weight
-    w4, w5, w6 = args.scale_loss_weight, args.mof_consistency_loss_weight, args.height_loss_weight
-    w7 = args.depth_loss_weight
+    w4, w5 = args.scale_loss_weight, args.mof_consistency_loss_weight
+    pose_weight = args.pose_weight
     # loss_1: photometric (eq.17)
     # loss_2: geometric (eq.18)
     # loss_3: smooth (eq.19)
@@ -282,7 +372,6 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     # loss_5: translation constraint (eq. 20)
     # loss_6: x
     # loss_7: x
-    # HACK: Ego-motionについての教師の重みを定義する（とりあえず１でいいかも）
 
     # switch to train mode
     disp_net.train().to(device)
@@ -292,7 +381,9 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     end = time.time()
     logger.train_bar.update(0)
 
-    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts, gt_rel_poses) in enumerate(train_loader):
+    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts, gt_rel_poses) in enumerate(
+        train_loader
+    ):
         if args.debug_mode and i > 5:
             break
 
@@ -305,7 +396,9 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         intrinsics = intrinsics.to(device)
         intrinsics_inv = intrinsics_inv.to(device)
         tgt_insts = [tgt_inst.to(device) for tgt_inst in tgt_insts]
-        ref_insts = [ref_inst.to(device) for ref_inst in ref_insts]  # ref_insts[i] == ref_imgs[i]とtgt_imgと比較したときにassociationできたref_imgs[i]内のインスタンスたち
+        ref_insts = [
+            ref_inst.to(device) for ref_inst in ref_insts
+        ]  # ref_insts[i] == ref_imgs[i]とtgt_imgと比較したときにassociationできたref_imgs[i]内のインスタンスたち
         gt_rel_poses = [pose.to(device) for pose in gt_rel_poses]
 
         ### input instance masking ###
@@ -314,63 +407,39 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         ]  # inst_img: torch.Size([max_num_insts, H, W])
         ref_bg_masks = [1 - (inst_img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for inst_img in ref_insts]
         tgt_bg_imgs = [tgt_img * tgt_mask * ref_mask for tgt_mask, ref_mask in zip(tgt_bg_masks, ref_bg_masks)]
-        ref_bg_imgs = [ref_img * tgt_mask * ref_mask for ref_img, tgt_mask, ref_mask in zip(ref_imgs, tgt_bg_masks, ref_bg_masks)]
+        ref_bg_imgs = [
+            ref_img * tgt_mask * ref_mask for ref_img, tgt_mask, ref_mask in zip(ref_imgs, tgt_bg_masks, ref_bg_masks)
+        ]
         tgt_obj_masks = [1 - mask for mask in tgt_bg_masks]
         ref_obj_masks = [1 - mask for mask in ref_bg_masks]
-        num_insts = [tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts]  # Number of instances for each sequence
+        num_insts = [
+            tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts
+        ]  # Number of instances for each sequence
 
         ### object height prior ###
         height_prior = disp_net.module.obj_height_prior
 
         ### compute depth & ego-motion ###
         tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
-        ego_poses_fwd, ego_poses_bwd, ego_pose_loss = compute_ego_pose_with_inv_and_loss(
+        (
+            ego_poses_fwd,
+            ego_poses_bwd,
+            translation_loss,
+            rotation_loss,
+            direction_loss,
+        ) = compute_ego_pose_with_inv_and_loss(
             ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_rel_poses
         )  # [ 2 x ([B, 6]) ]
 
         ### Remove ego-motion effect: transformation with ego-motion ###
         ### NumRefs(2) >> Nx(C+mni)xHxW,  {t-1}->{t} | {t+1}->{t} ###
-        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics)
+        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(
+            ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics
+        )
         ### NumRefs(2) >> Nx(C+mni)xHxW,  {t}->{t-1} | {t}->{t+1} ###
         t2r_imgs_ego, t2r_insts_ego, t2r_depths_ego, t2r_vals_ego = compute_ego_warp(
             [tgt_img, tgt_img], tgt_insts, [tgt_depth, tgt_depth], ego_poses_fwd, intrinsics
         )
-        """
-            sq = 0; bb = 0;
-            colormap = 'turbo'  # turbo, plasma
-            tgt = (tgt_img[bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            ref = (ref_imgs[sq][bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            r2t_val = r2t_vals_ego[sq][bb,0].detach().cpu().numpy()
-            t2r_val = t2r_vals_ego[sq][bb,0].detach().cpu().numpy()
-            r2t = (r2t_imgs_ego[sq][bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            t2r = (t2r_imgs_ego[sq][bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            r2t_inst = r2t_insts_ego[sq][bb,1:].detach().cpu().numpy().transpose(1,2,0)
-            t2r_inst = t2r_insts_ego[sq][bb,1:].detach().cpu().numpy().transpose(1,2,0)
-            tgt_d = 1/tgt_depth[bb,0].detach().cpu().numpy()
-            ref_d = 1/ref_depths[sq][bb,0].detach().cpu().numpy()
-            r2t_d_prev = 1/r2t_depths_ego[0][bb,0].detach().cpu().numpy()
-            r2t_d_next = 1/r2t_depths_ego[1][bb,0].detach().cpu().numpy()
-            r2t_d_prev_err = (tgt_d - r2t_d_prev)
-            r2t_d_next_err = (tgt_d - r2t_d_next)
-            plt.close('all');
-            ea1 = 4; ea2 = 4; ii = 1;
-            fig = plt.figure(1, figsize=(21, 9))
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(ref); plt.colorbar(); plt.text(10, -14, "ref", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(tgt); plt.colorbar(); plt.text(10, -14, "tgt", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t_val, vmax=1, vmin=0); plt.colorbar(); plt.text(10, -14, "r2t_val", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(t2r_val, vmax=1, vmin=0); plt.colorbar(); plt.text(10, -14, "t2r_val", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t); plt.colorbar(); plt.text(10, -14, "r2t", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(t2r); plt.colorbar(); plt.text(10, -14, "t2r", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(ref_d, cmap=colormap); plt.colorbar(); plt.text(10, -14, "ref_d", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(tgt_d, cmap=colormap); plt.colorbar(); plt.text(10, -14, "tgt_d", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t_inst); plt.colorbar(); plt.text(10, -14, "r2t_inst", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(t2r_inst); plt.colorbar(); plt.text(10, -14, "t2r_inst", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t_d_prev, cmap=colormap); plt.colorbar(); plt.text(10, -14, "r2t_d_prev", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t_d_next, cmap=colormap); plt.colorbar(); plt.text(10, -14, "r2t_d_next", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t_d_prev_err, vmax=0.5, vmin=-0.5); plt.colorbar(); plt.text(10, -14, "r2t_d_prev_err", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1; plt.imshow(r2t_d_next_err, vmax=0.5, vmin=-0.5); plt.colorbar(); plt.text(10, -14, "r2t_d_next_err", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            plt.tight_layout(); plt.ion(); plt.show()
-        """
 
         ### Compute object motion ###
         obj_poses_fwd, obj_poses_bwd = compute_obj_pose_with_inv(
@@ -389,10 +458,23 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         )
 
         ### Compute composite motion field ###
-        tot_mofs_fwd, tot_mofs_bwd = compute_motion_field(tgt_img, ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts)
+        tot_mofs_fwd, tot_mofs_bwd = compute_motion_field(
+            tgt_img, ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts
+        )
 
         ### Compute unified projection loss ###
-        loss_1, loss_2, r2t_imgs, t2r_imgs, r2t_flows, t2r_flows, r2t_diffs, t2r_diffs, r2t_vals, t2r_vals = compute_photo_and_geometry_loss(
+        (
+            loss_1,
+            loss_2,
+            r2t_imgs,
+            t2r_imgs,
+            r2t_flows,
+            t2r_flows,
+            r2t_diffs,
+            t2r_diffs,
+            r2t_vals,
+            t2r_vals,
+        ) = compute_photo_and_geometry_loss(
             tgt_img,
             ref_imgs,
             intrinsics,
@@ -410,97 +492,6 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
             r2t_vals_ego,
             t2r_vals_ego,
         )
-        """
-            sq = 0; bb = 0;
-            colormap = 'turbo'  # turbo, plasma
-            mmax = +0.01; mmin = -0.01;
-            plt.close('all')
-            globals().update(locals())
-            ref = (ref_imgs[sq][bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            tgt = (tgt_img[bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            r2t_ego = (r2t_imgs_ego[sq][bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            t2r_ego = (t2r_imgs_ego[sq][bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            r2t = (r2t_imgs[sq][bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            t2r = (t2r_imgs[sq][bb]*0.5+0.5).detach().cpu().numpy().transpose(1,2,0)
-            err_tgt = np.abs(tgt - r2t).mean(axis=-1)
-            err_ref = np.abs(ref - t2r).mean(axis=-1)
-            diff_tgt = r2t_diffs[sq][bb].detach().cpu().numpy().mean(axis=0)
-            diff_ref = t2r_diffs[sq][bb].detach().cpu().numpy().mean(axis=0)
-            tgtD = (1/tgt_depth[bb,0]).detach().cpu().numpy()
-            refD = (1/ref_depths[sq][bb,0]).detach().cpu().numpy()
-            tgtMOF_tx = tot_mofs_fwd[sq][bb,0].detach().cpu().numpy()
-            tgtMOF_ty = tot_mofs_fwd[sq][bb,1].detach().cpu().numpy()
-            tgtMOF_tz = tot_mofs_fwd[sq][bb,2].detach().cpu().numpy()
-            refMOF_tx = tot_mofs_bwd[sq][bb,0].detach().cpu().numpy()
-            refMOF_ty = tot_mofs_bwd[sq][bb,1].detach().cpu().numpy()
-            refMOF_tz = tot_mofs_bwd[sq][bb,2].detach().cpu().numpy()
-            tgtMOF_tx_obj = tgtMOF_tx - ego_poses_fwd[sq][bb][0].detach().cpu().numpy()
-            tgtMOF_tz_obj = tgtMOF_tz - ego_poses_fwd[sq][bb][2].detach().cpu().numpy()
-            refMOF_tx_obj = refMOF_tx - ego_poses_bwd[sq][bb][0].detach().cpu().numpy()
-            refMOF_tz_obj = refMOF_tz - ego_poses_bwd[sq][bb][2].detach().cpu().numpy()
-            tgtMF_tot = viz_flow(tgtMOF_tx, tgtMOF_tz, scaledown=0.05, output=False)
-            refMF_tot = viz_flow(refMOF_tx, refMOF_tz, scaledown=0.05, output=False)
-            tgtMF_obj = viz_flow(tgtMOF_tx_obj, tgtMOF_tz_obj, scaledown=0.01, output=False)
-            refMF_obj = viz_flow(refMOF_tx_obj, refMOF_tz_obj, scaledown=0.01, output=False)
-            tgt_obj_tx = np.array(list(OrderedDict.fromkeys(tgtMOF_tx_obj.reshape(-1)).keys()))
-            tgt_obj_tz = np.array(list(OrderedDict.fromkeys(tgtMOF_tz_obj.reshape(-1)).keys()))
-            ref_obj_tx = np.array(list(OrderedDict.fromkeys(refMOF_tx_obj.reshape(-1)).keys()))
-            ref_obj_tz = np.array(list(OrderedDict.fromkeys(refMOF_tz_obj.reshape(-1)).keys()))
-            tgtT_obj = [[tx, tz] for tx, tz in zip(tgt_obj_tx, tgt_obj_tz)]
-            refT_obj = [[tx, tz] for tx, tz in zip(ref_obj_tx, ref_obj_tz)]
-            plt.close('all');
-            ea1 = 6; ea2 = 4; ii = 1;
-            fig = plt.figure(1, figsize=(21, 12))   # figsize=(22, 13)
-            gs = GridSpec(nrows=6, ncols=4)
-            fig.add_subplot(gs[0, 0:2]); ii += 2;
-            plt.imshow(ref); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "ref", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(gs[0, 2:4]); ii += 2;
-            plt.imshow(tgt); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "tgt", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(gs[1, 0:2]); ii += 2;
-            plt.imshow(t2r_ego); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "t2r_ego", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(gs[1, 2:4]); ii += 2;b
-            plt.imshow(r2t_ego); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "r2t_ego", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(gs[2, 0:2]); ii += 2;
-            plt.imshow(t2r); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "t2r", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(gs[2, 2:4]); ii += 2;
-            plt.imshow(r2t); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "r2t", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(gs[3, 0:2]); ii += 2;
-            plt.imshow(refD, cmap=colormap); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "refD", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(gs[3, 2:4]); ii += 2;
-            plt.imshow(tgtD, cmap=colormap); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "tgtD", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1;
-            plt.imshow(tgtMF_tot); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4);
-            plt.text(10, -14, "tgtMF_tot,  ego (tx, tz): ({:.4f}, {:.4f})".format(ego_poses_fwd[sq][bb][0], ego_poses_fwd[sq][bb][2]), fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1;
-            plt.imshow(refMF_tot); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4);
-            plt.text(10, -14, "refMF_tot,  ego (tx, tz): ({:.4f}, {:.4f})".format(ego_poses_bwd[sq][bb][0], ego_poses_bwd[sq][bb][2]), fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1;
-            plt.imshow(tgtMF_obj); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4);
-            plt.text(10, -14, "tgtMF_obj:", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            [plt.text(140+(ii-1)*200, -14, "({:.4f}, {:.4f})".format(tx, tz), fontsize=7, bbox=dict(facecolor='None', edgecolor='None')) for ii, (tx, tz) in enumerate(zip(tgt_obj_tx, tgt_obj_tz)) if ii>0]
-            fig.add_subplot(ea1,ea2,ii); ii += 1;
-            plt.imshow(refMF_obj); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4);
-            plt.text(10, -14, "refMF_obj:", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            [plt.text(140+(ii-1)*200, -14, "({:.4f}, {:.4f})".format(tx, tz), fontsize=7, bbox=dict(facecolor='None', edgecolor='None')) for ii, (tx, tz) in enumerate(zip(ref_obj_tx, ref_obj_tz)) if ii>0]
-            fig.add_subplot(ea1,ea2,ii); ii += 1;
-            plt.imshow(err_tgt, cmap='bone', vmax=0.5, vmin=0); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "err_tgt", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            fig.add_subplot(ea1,ea2,ii); ii += 1;
-            plt.imshow(err_ref, cmap='bone', vmax=0.5, vmin=0); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "err_ref", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            plt.tight_layout(); plt.ion();
-            plt.show()
-
-
-            plt.imshow(tgtMOF_tx, vmax=ego_poses_fwd[sq][bb,0].item()+mmax, vmin=ego_poses_fwd[sq][bb,0].item()+mmin); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "tgtMOF_tx", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            plt.imshow(refMOF_tx, vmax=ego_poses_bwd[sq][bb,0].item()+mmax, vmin=ego_poses_bwd[sq][bb,0].item()+mmin); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "refMOF_tx", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            plt.imshow(tgtMOF_ty, vmax=ego_poses_fwd[sq][bb,1].item()+mmax, vmin=ego_poses_fwd[sq][bb,1].item()+mmin); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "tgtMOF_ty", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            plt.imshow(refMOF_ty, vmax=ego_poses_bwd[sq][bb,1].item()+mmax, vmin=ego_poses_bwd[sq][bb,1].item()+mmin); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "refMOF_ty", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            plt.imshow(tgtMOF_tz, vmax=ego_poses_fwd[sq][bb,2].item()+mmax*2, vmin=ego_poses_fwd[sq][bb,2].item()+mmin*2); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "tgtMOF_tz", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            plt.imshow(refMOF_tz, vmax=ego_poses_bwd[sq][bb,2].item()+mmax*2, vmin=ego_poses_bwd[sq][bb,2].item()+mmin*2); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "refMOF_tz", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-
-            plt.imshow(diff_tgt, cmap='bone', vmax=0.5, vmin=0); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "diff_tgt", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-            plt.imshow(diff_ref, cmap='bone', vmax=0.5, vmin=0); plt.colorbar(); plt.grid(linestyle=':', linewidth=0.4); plt.text(10, -14, "diff_ref", fontsize=7, bbox=dict(facecolor='None', edgecolor='None'));
-
-        """
         ### Compute depth smoothness loss ###
         if w3 == 0:
             loss_3 = torch.tensor(0.0).cuda()
@@ -511,42 +502,63 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         if w4 == 0:
             loss_4 = torch.tensor(0.0).cuda()
         else:
-            loss_4 = compute_obj_size_constraint_loss(height_prior, tgt_depth, tgt_insts, ref_depths, ref_insts, intrinsics, args.mni, num_insts)
+            loss_4 = compute_obj_size_constraint_loss(
+                height_prior, tgt_depth, tgt_insts, ref_depths, ref_insts, intrinsics, args.mni, num_insts
+            )
 
         ### Compute unified motion consistency loss ###
         if w5 == 0:
             loss_5 = torch.tensor(0.0).cuda()
         else:
             loss_5 = compute_mof_consistency_loss(
-                tot_mofs_fwd, tot_mofs_bwd, r2t_flows, t2r_flows, r2t_diffs, t2r_diffs, r2t_vals, t2r_vals, alpha=5, thresh=0.1
+                tot_mofs_fwd,
+                tot_mofs_bwd,
+                r2t_flows,
+                t2r_flows,
+                r2t_diffs,
+                t2r_diffs,
+                r2t_vals,
+                t2r_vals,
+                alpha=5,
+                thresh=0.1,
             )
 
         ### Compute height prior constraint loss ###
         # 学習には使ってない．height-priorをTensorboardで見たかっただけ？
-        loss_6 = height_prior
-
+        # loss_6 = height_prior
         ### Compute depth mean constraint loss ###
         # 学習には使ってない．これもTensorboardで見たかっただけ？
-        loss_7 = ((1 / tgt_depth).mean() + sum([(1 / depth).mean() for depth in ref_depths])) / (1 + len(ref_depths))
+        # loss_7 = ((1 / tgt_depth).mean() + sum([(1 / depth).mean() for depth in ref_depths])) / (1 + len(ref_depths))
 
-        loss = w1 * loss_1 + w2 * loss_2 + w3 * loss_3 + w4 * loss_4 + w5 * loss_5 + w6 * loss_6 + w7 * loss_7 + ego_pose_loss
+        # loss = w1 * loss_1 + w2 * loss_2 + w3 * loss_3 + w4 * loss_4 + w5 * loss_5 + w6 * loss_6 + w7 * loss_7 + ego_pose_loss
+        loss = (
+            w1 * loss_1
+            + w2 * loss_2
+            + w3 * loss_3
+            + w4 * loss_4
+            + w5 * loss_5
+            + pose_weight * translation_loss
+            + pose_weight * rotation_loss
+            + pose_weight * direction_loss
+        )
         """
             loss_1.item(), loss_2.item(), loss_3.item(), loss_4.item(), loss_5.item()
             w1*loss_1.item(), w2*loss_2.item(), w3*loss_3.item(), w4*loss_4.item(), w5*loss_5.item()
 
             -b 4 -p 1.0 -c 0.5 -s 0.05 -o 0.01 -mc 0.01 -hp 0 -dm 0 -mni 3 \
-
         """
-
         if log_losses:
-            tf_writer.add_scalar("photo_loss", loss_1.item(), n_iter)
-            tf_writer.add_scalar("geometry_loss", loss_2.item(), n_iter)
-            tf_writer.add_scalar("smooth_loss", loss_3.item(), n_iter)
-            tf_writer.add_scalar("scale_loss", loss_4.item(), n_iter)
-            tf_writer.add_scalar("mof_consistency_loss", loss_5.item(), n_iter)
-            tf_writer.add_scalar("height_loss", loss_6.item(), n_iter)
-            tf_writer.add_scalar("depth_loss", loss_7.item(), n_iter)
-            tf_writer.add_scalar("total_loss", loss.item(), n_iter)
+            tf_writer.add_scalar("train/total_loss", loss.item(), n_iter)
+            tf_writer.add_scalar("train/photo_loss", loss_1.item(), n_iter)
+            tf_writer.add_scalar("train/geometry_loss", loss_2.item(), n_iter)
+            tf_writer.add_scalar("train/smooth_loss", loss_3.item(), n_iter)
+            tf_writer.add_scalar("train/scale_loss", loss_4.item(), n_iter)
+            tf_writer.add_scalar("train/mof_consistency_loss", loss_5.item(), n_iter)
+            # tf_writer.add_scalar("height_loss", loss_6.item(), n_iter)
+            # tf_writer.add_scalar("depth_loss", loss_7.item(), n_iter)
+            tf_writer.add_scalar("train/translation_loss", translation_loss.item(), n_iter)
+            tf_writer.add_scalar("train/rotation_loss", rotation_loss.item(), n_iter)
+            tf_writer.add_scalar("train/direction_loss", direction_loss.item(), n_iter)
 
         ### record loss ###
         losses.update(loss.item(), args.batch_size)
@@ -562,16 +574,29 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         end = time.time()
 
         ### fail-safe ###
-        if np.isnan(loss.detach().cpu().numpy()):
-            pdb.set_trace()
-        if np.isnan(height_prior.detach().cpu().numpy()):
-            pdb.set_trace()
-        if np.isnan(tgt_depth.mean().detach().cpu().numpy()):
-            pdb.set_trace()
+        # if np.isnan(loss.detach().cpu().numpy()):
+        #     pdb.set_trace()
+        # if np.isnan(height_prior.detach().cpu().numpy()):
+        #     pdb.set_trace()
+        # if np.isnan(tgt_depth.mean().detach().cpu().numpy()):
+        #     pdb.set_trace()
 
-        with open(args.save_path / args.log_full, "a") as csvfile:
+        with open(args.save_dir / args.log_full, "a") as csvfile:
             csv_full = csv.writer(csvfile, delimiter="\t")
-            csv_full.writerow([loss_1.item(), loss_2.item(), loss_3.item(), loss_4.item(), loss_5.item(), loss_6.item(), loss_7.item(), loss.item()])
+            # csv_full.writerow([loss_1.item(), loss_2.item(), loss_3.item(), loss_4.item(), loss_5.item(), loss_6.item(), loss_7.item(), loss.item()])
+            csv_full.writerow(
+                [
+                    loss_1.item(),
+                    loss_2.item(),
+                    loss_3.item(),
+                    loss_4.item(),
+                    loss_5.item(),
+                    translation_loss.item(),
+                    rotation_loss.item(),
+                    direction_loss.item(),
+                    loss.item(),
+                ]
+            )
         logger.train_bar.update(i + 1)
         if i % args.print_freq == 0:
             logger.train_writer.write("Train: Time {} Data {} Loss {}".format(batch_time, data_time, losses))
@@ -586,10 +611,10 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
 @torch.no_grad()
 def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, logger):
     batch_time = AverageMeter()
-    losses_meter = AverageMeter(n_meters=5, precision=4)
+    losses_meter = AverageMeter(n_meters=7, precision=4)
 
     w1, w2, w3 = args.photo_loss_weight, args.geometry_consistency_weight, args.smooth_loss_weight
-    # HACK: その他のロスは不要？ w4, w5 = args.scale_loss_weight, args.mof_consistency_loss_weight
+    pose_weight = args.pose_weight
 
     # switch to evaluation mode
     disp_net.eval()
@@ -616,18 +641,30 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
         tgt_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in tgt_insts]
         ref_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in ref_insts]
         tgt_bg_imgs = [tgt_img * tgt_mask * ref_mask for tgt_mask, ref_mask in zip(tgt_bg_masks, ref_bg_masks)]
-        ref_bg_imgs = [ref_img * tgt_mask * ref_mask for ref_img, tgt_mask, ref_mask in zip(ref_imgs, tgt_bg_masks, ref_bg_masks)]
+        ref_bg_imgs = [
+            ref_img * tgt_mask * ref_mask for ref_img, tgt_mask, ref_mask in zip(ref_imgs, tgt_bg_masks, ref_bg_masks)
+        ]
         tgt_obj_masks = [1 - mask for mask in tgt_bg_masks]
         ref_obj_masks = [1 - mask for mask in ref_bg_masks]
-        num_insts = [tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts]  # Number of instances for each sequence
+        num_insts = [
+            tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts
+        ]  # Number of instances for each sequence
 
         ### compute depth & ego-motion ###
         tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
         # ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(ego_pose_net, tgt_bg_imgs, ref_bg_imgs)  # [ 2 x ([B, 6]) ]
-        ego_poses_fwd, ego_poses_bwd, ego_pose_loss = compute_ego_pose_with_inv_and_loss(ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_rel_poses)
+        (
+            ego_poses_fwd,
+            ego_poses_bwd,
+            translation_loss,
+            rotation_loss,
+            direction_loss,
+        ) = compute_ego_pose_with_inv_and_loss(ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_rel_poses)
 
         ### Remove ego-motion effect: transformation with ego-motion ###
-        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics)
+        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(
+            ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics
+        )
         t2r_imgs_ego, t2r_insts_ego, t2r_depths_ego, t2r_vals_ego = compute_ego_warp(
             [tgt_img, tgt_img], tgt_insts, [tgt_depth, tgt_depth], ego_poses_fwd, intrinsics
         )
@@ -649,7 +686,9 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
         )
 
         ### Compute composite motion field ###
-        tot_mofs_fwd, tot_mofs_bwd = compute_motion_field(tgt_img, ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts)
+        tot_mofs_fwd, tot_mofs_bwd = compute_motion_field(
+            tgt_img, ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts
+        )
 
         ### Compute unified projection loss ###
         loss_1, loss_2, _, _, _, _, _, _, _, _ = compute_photo_and_geometry_loss(
@@ -677,10 +716,19 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
         loss_1 = loss_1.item()
         loss_2 = loss_2.item()
         loss_3 = loss_3.item()
-        ego_pose_loss = ego_pose_loss.item()
+        translation_loss = translation_loss.item()
+        rotation_loss = rotation_loss.item()
+        direction_loss = direction_loss.item()
 
-        loss = w1 * loss_1 + w2 * loss_2 + w3 * loss_3 + ego_pose_loss
-        losses_meter.update([loss, loss_1, loss_2, loss_3, ego_pose_loss])
+        loss = (
+            w1 * loss_1
+            + w2 * loss_2
+            + w3 * loss_3
+            + pose_weight * translation_loss
+            + pose_weight * rotation_loss
+            + pose_weight * direction_loss
+        )
+        losses_meter.update([loss, loss_1, loss_2, loss_3, translation_loss, rotation_loss, direction_loss])
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -690,7 +738,15 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
             logger.valid_writer.write("valid: Time {} Loss {}".format(batch_time, losses_meter))
 
     logger.valid_bar.update(len(val_loader))
-    return losses_meter.avg, ["Total loss", "Photo loss", "Geometry loss", "Smooth loss", "Ego-pose loss"]
+    return losses_meter.avg, [
+        "valid/total loss",
+        "valid/photo loss",
+        "valid/geometry loss",
+        "valid/smooth loss",
+        "valid/translation_loss",
+        "valid/rotation_loss",
+        "valid/direction_loss",
+    ]
 
 
 @torch.no_grad()
@@ -725,17 +781,25 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
         tgt_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in tgt_insts]
         ref_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in ref_insts]
         tgt_bg_imgs = [tgt_img * tgt_mask * ref_mask for tgt_mask, ref_mask in zip(tgt_bg_masks, ref_bg_masks)]
-        ref_bg_imgs = [ref_img * tgt_mask * ref_mask for ref_img, tgt_mask, ref_mask in zip(ref_imgs, tgt_bg_masks, ref_bg_masks)]
+        ref_bg_imgs = [
+            ref_img * tgt_mask * ref_mask for ref_img, tgt_mask, ref_mask in zip(ref_imgs, tgt_bg_masks, ref_bg_masks)
+        ]
         tgt_obj_masks = [1 - mask for mask in tgt_bg_masks]
         ref_obj_masks = [1 - mask for mask in ref_bg_masks]
-        num_insts = [tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts]  # Number of instances for each sequence
+        num_insts = [
+            tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts
+        ]  # Number of instances for each sequence
 
         ### compute depth & ego-motion ###
         tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
-        ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(ego_pose_net, tgt_bg_imgs, ref_bg_imgs)  # [ 2 x ([B, 6]) ]
+        ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(
+            ego_pose_net, tgt_bg_imgs, ref_bg_imgs
+        )  # [ 2 x ([B, 6]) ]
 
         ### Remove ego-motion effect: transformation with ego-motion ###
-        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics)
+        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(
+            ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics
+        )
         t2r_imgs_ego, t2r_insts_ego, t2r_depths_ego, t2r_vals_ego = compute_ego_warp(
             [tgt_img, tgt_img], tgt_insts, [tgt_depth, tgt_depth], ego_poses_fwd, intrinsics
         )
@@ -757,7 +821,9 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
         )
 
         ### Compute composite motion field ###
-        tot_mofs_fwd, tot_mofs_bwd = compute_motion_field(tgt_img, ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts)
+        tot_mofs_fwd, tot_mofs_bwd = compute_motion_field(
+            tgt_img, ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts
+        )
 
         ### Compute unified projection loss ###
         loss_1, loss_2, _, _, _, _, _, _, _, _ = compute_photo_and_geometry_loss(
@@ -807,7 +873,6 @@ def validate_with_gt(args, val_loader, disp_net, epoch, logger):
     errors = AverageMeter(n_meters=len(error_names))
     errors_fg = AverageMeter(n_meters=len(error_names))
     errors_bg = AverageMeter(n_meters=len(error_names))
-    # TODO: poseも追加する
 
     # switch to evaluate mode
     disp_net = disp_net.module.to(device_val)
@@ -845,7 +910,9 @@ def validate_with_gt(args, val_loader, disp_net, epoch, logger):
         end = time.time()
         logger.valid_bar.update(i + 1)
         if i % args.print_freq == 0:
-            logger.valid_writer.write("valid: Time {} Abs_Rel Error {:.4f} ({:.4f})".format(batch_time, errors.val[1], errors.avg[1]))
+            logger.valid_writer.write(
+                "valid: Time {} Abs_Rel Error {:.4f} ({:.4f})".format(batch_time, errors.val[1], errors.avg[1])
+            )
     logger.valid_bar.update(len(val_loader))
 
     return errors.avg, error_names
@@ -877,7 +944,11 @@ def compute_ego_pose_with_inv(pose_net, tgt_imgs, ref_imgs):
 def compute_ego_pose_with_inv_and_loss(pose_net, tgt_imgs, ref_imgs, seq_rel_poses):
     poses_fwd = []
     poses_bwd = []
-    pose_loss = 0.0
+    translation_loss, rotation_loss, direction_loss = (
+        torch.tensor(0.0).cuda(),
+        torch.tensor(0.0).cuda(),
+        torch.tensor(0.0).cuda(),
+    )
 
     # tgt_imgs: [(4,3,256,832), (4,3,256,832)]
 
@@ -890,12 +961,23 @@ def compute_ego_pose_with_inv_and_loss(pose_net, tgt_imgs, ref_imgs, seq_rel_pos
         bwd_pose = pose_net(ref_img, tgt_img)
         poses_fwd.append(fwd_pose)
         poses_bwd.append(bwd_pose)
-        pose_loss += ego_pose_loss(fwd_pose, gt_rot_mats, gt_translation_vecs)
+        tmp_translation_loss, tmp_rotation_loss, tmp_direction_loss = ego_pose_loss(
+            fwd_pose, gt_rot_mats, gt_translation_vecs
+        )
+        translation_loss += tmp_translation_loss
+        rotation_loss += tmp_rotation_loss
+        direction_loss += tmp_direction_loss
 
         ## -(R.T @ t).T == -t.T @ R, t.Tは横ベクトル
         # pose_loss += ego_pose_loss(bwd_pose, gt_rot_mats.T, -gt_translation_vecs @ gt_rot_mats)
-        pose_loss += ego_pose_loss(bwd_pose, gt_rot_mats.transpose(1, 2), -gt_translation_vecs @ gt_rot_mats)
-    return poses_fwd, poses_bwd, pose_loss
+        tmp_translation_loss, tmp_rotation_loss, tmp_direction_loss = ego_pose_loss(
+            bwd_pose, gt_rot_mats.transpose(1, 2), -gt_translation_vecs @ gt_rot_mats
+        )
+        translation_loss += tmp_translation_loss
+        rotation_loss += tmp_rotation_loss
+        direction_loss += tmp_direction_loss
+
+    return poses_fwd, poses_bwd, translation_loss, rotation_loss, direction_loss
 
 
 def compute_ego_warp(imgs, insts, depths, poses, intrinsics, is_detach=True):
@@ -925,7 +1007,9 @@ def compute_ego_warp(imgs, insts, depths, poses, intrinsics, is_detach=True):
     return w_imgs, w_insts, w_depths, w_vals
 
 
-def compute_obj_pose_with_inv(pose_net, tgtI, tgtMs, r2tIs, r2tMs, refIs, refMs, t2rIs, t2rMs, intrinsics, mni, num_insts):
+def compute_obj_pose_with_inv(
+    pose_net, tgtI, tgtMs, r2tIs, r2tMs, refIs, refMs, t2rIs, t2rMs, intrinsics, mni, num_insts
+):
     """
     Args:
         ------------------------------------------------
@@ -955,7 +1039,9 @@ def compute_obj_pose_with_inv(pose_net, tgtI, tgtMs, r2tIs, r2tMs, refIs, refMs,
 
     obj_poses_fwd, obj_poses_bwd = [], []
 
-    for tgtM, r2tI, r2tM, refI, refM, t2rI, t2rM, num_inst in zip(tgtMs, r2tIs, r2tMs, refIs, refMs, t2rIs, t2rMs, num_insts):
+    for tgtM, r2tI, r2tM, refI, refM, t2rI, t2rM, num_inst in zip(
+        tgtMs, r2tIs, r2tMs, refIs, refMs, t2rIs, t2rMs, num_insts
+    ):
         obj_pose_fwd = torch.zeros([bs * mni, 3]).type_as(tgtI)
         obj_pose_bwd = torch.zeros([bs * mni, 3]).type_as(tgtI)
 
@@ -1010,7 +1096,9 @@ def compute_motion_field(tgt_img, ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, o
     bs, _, hh, ww = tgt_img.size()
     MFs_fwd, MFs_bwd = [], []  # [ ([B, 6, 256, 832]), ([B, 6, 256, 832]) ]
 
-    for EP_fwd, EP_bwd, OP_fwd, OP_bwd, tgt_inst, ref_inst in zip(ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts):
+    for EP_fwd, EP_bwd, OP_fwd, OP_bwd, tgt_inst, ref_inst in zip(
+        ego_poses_fwd, ego_poses_bwd, obj_poses_fwd, obj_poses_bwd, tgt_insts, ref_insts
+    ):
         if (tgt_inst[:, 1:].sum(dim=1) > 1).sum() + (ref_inst[:, 1:].sum(dim=1) > 1).sum():
             print("WARNING: overlapped instance region at {}".format(datetime.datetime.now().strftime("%m-%d-%H:%M")))
 

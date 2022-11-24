@@ -2,7 +2,8 @@
 
 PRETRAINED=pretrained/KITTI
 
-KITTI_DIR=/home/gkinoshita/workspace/Insta-DM/kitti_256
+# KITTI_DIR=/home/gkinoshita/workspace/Insta-DM/kitti_256
+KITTI_DIR=/home/gkinoshita/dugong/workspace/Insta-DM/kitti_256
 
 VALIDATION_TXT=$KITTI_DIR/val.txt
 while read LINE
@@ -16,7 +17,7 @@ do
     --pretrained-obj-pose $PRETRAINED/resnet18_obj_kt.tar \
     --mni 3 \
     --name demo_val \
-    --save-fig
+    # --save-fig
 done < "${VALIDATION_TXT}"
 
 # Errorが出るものだけをピックアップ

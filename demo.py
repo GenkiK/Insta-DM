@@ -9,6 +9,7 @@ import datetime
 import itertools
 import os
 import pdb
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,10 @@ from matplotlib.gridspec import GridSpec
 from mpl_toolkits.mplot3d.axes3d import Axes3D
 from scipy import stats
 
-import custom_transforms
+warnings.simplefilter("ignore", UserWarning)
+
+
+import custom_transforms_original
 import drawRobotics as dR
 import models
 from demo_utils import (
@@ -34,15 +38,41 @@ from demo_utils import (
 from flow_io import flow_read
 from rigid_warp import cam2homo, flow_warp, pixel2cam, pose_vec2mat
 
-parser = argparse.ArgumentParser(description="Instance-wise Depth and Motion Learning", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser = argparse.ArgumentParser(
+    description="Instance-wise Depth and Motion Learning", formatter_class=argparse.ArgumentDefaultsHelpFormatter
+)
 parser.add_argument("--data", metavar="DIR", help="path to dataset dir")
 parser.add_argument("-b", "--batch-size", default=1, type=int, metavar="N", help="mini-batch size")
 parser.add_argument("-j", "--workers", default=0, type=int, metavar="N", help="number of data loading workers")
-parser.add_argument("--pretrained-disp", dest="pretrained_disp", default=None, metavar="PATH", help="path to pre-trained dispresnet model")
-parser.add_argument("--pretrained-ego-pose", dest="pretrained_ego_pose", default=None, metavar="PATH", help="path to pre-trained Ego Pose net model")
-parser.add_argument("--pretrained-obj-pose", dest="pretrained_obj_pose", default=None, metavar="PATH", help="path to pre-trained Obj Pose net model")
+parser.add_argument(
+    "--pretrained-disp",
+    dest="pretrained_disp",
+    default=None,
+    metavar="PATH",
+    help="path to pre-trained dispresnet model",
+)
+parser.add_argument(
+    "--pretrained-ego-pose",
+    dest="pretrained_ego_pose",
+    default=None,
+    metavar="PATH",
+    help="path to pre-trained Ego Pose net model",
+)
+parser.add_argument(
+    "--pretrained-obj-pose",
+    dest="pretrained_obj_pose",
+    default=None,
+    metavar="PATH",
+    help="path to pre-trained Obj Pose net model",
+)
 parser.add_argument("--mni", default=3, type=int, help="maximum number of instances")
-parser.add_argument("--name", dest="name", type=str, required=True, help="name of the experiment, checkpoints are stored in checkpoints/name")
+parser.add_argument(
+    "--name",
+    dest="name",
+    type=str,
+    required=True,
+    help="name of the experiment, checkpoints are stored in checkpoints/name",
+)
 parser.add_argument("--save-fig", action="store_true", help="save figures or not")
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -55,7 +85,10 @@ class SequenceFolder:
 
         img_dir = Path(data_dir)
         seg_dir = Path(os.path.join(img_dir.parents[1], "segmentation", img_dir.name))
-        flo_dir = [Path(os.path.join(img_dir.parents[1], "flow_f", img_dir.name)), Path(os.path.join(img_dir.parents[1], "flow_b", img_dir.name))]
+        flo_dir = [
+            Path(os.path.join(img_dir.parents[1], "flow_f", img_dir.name)),
+            Path(os.path.join(img_dir.parents[1], "flow_b", img_dir.name)),
+        ]
 
         intrinsics = np.genfromtxt(img_dir / "cam.txt").astype(np.float32).reshape((3, 3))
         # 画像などのパスのリスト
@@ -95,14 +128,21 @@ class SequenceFolder:
         # ただしseg0[0]のマスク領域が0の背景部分(?)は，argsort(descending=True)したときに常に最後尾にくるが，これは先頭に来るように固定している([:-1]で背景部分のインデックスを削除して，torch.cat([torch.zeros(1).long(), ...]))で先頭に持ってきている．
         # longはなんかそうしないとTorchに怒られるから(tensors used as indices must be long, byte or bool tensors)
         # 背景はReIDするときに必要となる（maxIoUが0のとき，max(match_table)したときのIndexが0となる．index 0は背景のIndex）
-        seg0 = seg0[torch.cat([torch.zeros(1).long(), seg0.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)].unsqueeze(
+        seg0 = seg0[
+            torch.cat([torch.zeros(1).long(), seg0.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)
+        ].unsqueeze(
             0
         )  # torch.Size([1, 6, 256, 832], dtype=torch.float32)
-        seg1 = seg1[torch.cat([torch.zeros(1).long(), seg1.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)].unsqueeze(0)
+        seg1 = seg1[
+            torch.cat([torch.zeros(1).long(), seg1.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)
+        ].unsqueeze(0)
 
         insts0, insts1 = [], []
-        # HACK: nocとは何？
         noc_f, noc_b = find_noc_masks(flof, flob)
+        # plt.imshow(noc_f[0][0])
+        # plt.show()
+        # plt.imshow(noc_b[0][0])
+        # plt.show()
         seg0w, _ = flow_warp(seg1, flof)  # おそらくseg0w == warped_seg0_from_seg1
         seg1w, _ = flow_warp(seg0, flob)
 
@@ -116,7 +156,9 @@ class SequenceFolder:
 
         # 1つのインスタンスにつき，1つのチャネルを作りたい?
         # 初期化
-        seg0_re = torch.zeros(self.max_num_instances + 1, seg0.shape[2], seg0.shape[3])  # seg.shape[2] == H, seg.shape[3] == W
+        seg0_re = torch.zeros(
+            self.max_num_instances + 1, seg0.shape[2], seg0.shape[3]
+        )  # seg.shape[2] == H, seg.shape[3] == W
         seg1_re = torch.zeros(self.max_num_instances + 1, seg1.shape[2], seg1.shape[3])
         non_overlap_0 = torch.ones([seg0.shape[2], seg0.shape[3]])
         non_overlap_1 = torch.ones([seg0.shape[2], seg0.shape[3]])
@@ -147,13 +189,16 @@ class SequenceFolder:
         seg0, seg1 = recursive_check_nonzero_inst(seg0, seg1)
 
         return img0, img1, seg0, seg1, intrinsics, np.linalg.inv(intrinsics)
+        # return ref, tgt, ref_seg, tgt_seg, intrinsics, np.linalg.inv(intrinsics)
 
     def __len__(self):
         return len(self.samples)
 
 
 def main():
-    print("=> PyTorch version: " + torch.__version__ + " || CUDA_VISIBLE_DEVICES: " + os.environ["CUDA_VISIBLE_DEVICES"])
+    print(
+        "=> PyTorch version: " + torch.__version__ + " || CUDA_VISIBLE_DEVICES: " + os.environ["CUDA_VISIBLE_DEVICES"]
+    )
 
     args = parser.parse_args()
     if args.save_fig:
@@ -164,14 +209,16 @@ def main():
         args.save_path.mkdir(parents=True, exist_ok=True)
     print(f"=> fetching scenes in '{args.data}'")
     # 画像の前処理
-    normalize = custom_transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    demo_transform = custom_transforms.Compose(
-        [custom_transforms.ArrayToTensor(), normalize]
+    normalize = custom_transforms_original.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    demo_transform = custom_transforms_original.Compose(
+        [custom_transforms_original.ArrayToTensor(), normalize]
     )  # ここで構成したNormalizeとArrayToTensorからなるTransformはSequenceFolderからサンプルを__getitem__()する度に適用する
     # SequenceFolderはただのDatasetと思えば良い
     demo_set = SequenceFolder(args.data, transform=demo_transform, max_num_instances=args.mni)
     print(f"=> {len(demo_set)} samples found")
-    demo_loader = torch.utils.data.DataLoader(demo_set, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
+    demo_loader = torch.utils.data.DataLoader(
+        demo_set, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True
+    )
 
     # create model
     print("=> creating model")
@@ -255,7 +302,11 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             objIDs.append(np.arange(num_inst).tolist())
         else:
             # -> ref_seg의 인스턴스들이 tgt_seg_prev의 몇 번째 채널 인스턴스에 매칭되는가?
-            p2c_iou, p2c_idx = inst_iou(ref_seg.cpu(), tgt_seg_prev.cpu(), torch.ones(1, 1, ref_seg.size(2), ref_seg.size(3)).type_as(ref_seg).cpu())
+            p2c_iou, p2c_idx = inst_iou(
+                ref_seg.cpu(),
+                tgt_seg_prev.cpu(),
+                torch.ones(1, 1, ref_seg.size(2), ref_seg.size(3)).type_as(ref_seg).cpu(),
+            )
             p2c_iou = p2c_iou[1:]
             p2c_idx = p2c_idx[1:] - 1
             newColorID = list(set(np.arange(len(colors))) - set(objIDs[-1]))
@@ -298,10 +349,12 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         """
 
         # compute depth & camera motion
-        ref_depth = 1 / disp_net(ref_img)
-        tgt_depth = 1 / disp_net(tgt_img)
-        ego_pose = ego_pose_net(tgt_bg_img, ref_bg_img)
+        ref_depth = 1 / disp_net(ref_img)  # t-1
+        tgt_depth = 1 / disp_net(tgt_img)  # t
+        ego_pose = ego_pose_net(tgt_bg_img, ref_bg_img)  # t-1 -> t
         ego_pose_inv = ego_pose_net(ref_bg_img, tgt_bg_img)
+        print(f"ego_pose: ego_pose_net(tgt, ref)= {ego_pose}")
+        print(f"ego_pose_inv: ego_pose_net(ref, tgt)= {ego_pose_inv}")
 
         ego_mat = pose_vec2mat(ego_pose).squeeze(0).cpu().detach().numpy()
         ego_mat = np.concatenate([ego_mat, np.array([0, 0, 0, 1]).reshape(1, 4)], axis=0)
@@ -311,6 +364,7 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         ### Batch-wise computing ###    rtt_Is, rtt_Ms, prj_Ds, cmp_Ds  --> (19.11.18) change from fw to iw for bg regions
         ### Outputs:  warped-masked-bg-img,  valid-bg-mask,  valid-bg-proj-depth,  valid-bg-comp-depth ###
         ### NumScales(1) >> NumRefs(2) >> I-M-D-D(4) >> 2B(fwd/bwd)xCxHxW ###
+        # arguments: tgt_img, ref_imgs, tgt_bg_masks, ref_bg_masks, tgt_depth, ref_depths, poses, poses_inv, intrinsics
         IMDDs = compute_batch_bg_warping(
             tgt_img,
             [ref_img, ref_img],
@@ -365,12 +419,21 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             ref_obj_depth = ref_depth.repeat(num_inst, 1, 1, 1) * ref_seg[0, 1 : 1 + num_inst].unsqueeze(1)
             tgt_obj_depth = tgt_depth.repeat(num_inst, 1, 1, 1) * tgt_seg[0, 1 : 1 + num_inst].unsqueeze(1)
 
-            # FIXME: objectが見つからなかったときにエラーが起こる
             _, _, _, _, r2t_obj_imgs, r2t_obj_masks, _, r2t_obj_sc_depths = compute_reverse_warp_ego(
-                [ref_depth, ref_depth], [ref_obj_img, ref_obj_img], [ref_obj_mask, ref_obj_mask], [ego_pose_inv, ego_pose_inv], intrinsics, num_insts
+                [ref_depth, ref_depth],
+                [ref_obj_img, ref_obj_img],
+                [ref_obj_mask, ref_obj_mask],
+                [ego_pose_inv, ego_pose_inv],
+                intrinsics,
+                num_insts,
             )
-            _, _, _, _, t2r_obj_imgs, t2r_obj_masks, _, t2r_obj_sc_depths = compute_reverse_warp_ego(
-                [tgt_depth, tgt_depth], [tgt_obj_img, tgt_obj_img], [tgt_obj_mask, tgt_obj_mask], [ego_pose, ego_pose], intrinsics, num_insts
+            _, _, _, _, t2r_obj_imgs, _, _, t2r_obj_sc_depths = compute_reverse_warp_ego(
+                [tgt_depth, tgt_depth],
+                [tgt_obj_img, tgt_obj_img],
+                [tgt_obj_mask, tgt_obj_mask],
+                [ego_pose, ego_pose],
+                intrinsics,
+                num_insts,
             )
 
             obj_pose = obj_pose_net(tgt_obj_img, r2t_obj_imgs[0])
@@ -379,9 +442,11 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             obj_pose_inv = torch.cat([obj_pose_inv, torch.zeros_like(obj_pose_inv)], dim=1)
 
             obj_mat = pose_vec2mat(obj_pose).cpu().detach().numpy()
-            obj_mat = np.concatenate([obj_mat, np.array([0, 0, 0, 1]).reshape(1, 1, 4).repeat(obj_pose.size(0), axis=0)], axis=1)
+            obj_mat = np.concatenate(
+                [obj_mat, np.array([0, 0, 0, 1]).reshape(1, 1, 4).repeat(obj_pose.size(0), axis=0)], axis=1
+            )
 
-            obj_IMDDs, obj_ovls = compute_batch_obj_warping(
+            obj_IMDDs, _ = compute_batch_obj_warping(
                 tgt_img,
                 [ref_img, ref_img],
                 [tgt_obj_mask, tgt_obj_mask],
@@ -397,11 +462,21 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             )
 
             tr_fwd, tr_bwd = compute_obj_translation(
-                r2t_obj_sc_depths, t2r_obj_sc_depths, [tgt_obj_depth, tgt_obj_depth], [ref_obj_depth, ref_obj_depth], num_insts, intrinsics
+                r2t_obj_sc_depths,
+                t2r_obj_sc_depths,
+                [tgt_obj_depth, tgt_obj_depth],
+                [ref_obj_depth, ref_obj_depth],
+                num_insts,
+                intrinsics,
             )
 
             rtt_obj_imgs, rtt_obj_masks, rtt_obj_depths, rtt_obj_sc_depths = compute_reverse_warp_obj(
-                r2t_obj_sc_depths, r2t_obj_imgs, r2t_obj_masks, [-obj_pose, -obj_pose], intrinsics.repeat(num_inst, 1, 1), num_insts
+                r2t_obj_sc_depths,
+                r2t_obj_imgs,
+                r2t_obj_masks,
+                [-obj_pose, -obj_pose],
+                intrinsics.repeat(num_inst, 1, 1),
+                num_insts,
             )
             r2t_objs_coords = pixel2cam(r2t_obj_sc_depths[0][:, 0], intrinsics.inverse().repeat(num_inst, 1, 1))
             rtt_objs_coords = pixel2cam(rtt_obj_sc_depths[0][:, 0], intrinsics.inverse().repeat(num_inst, 1, 1))
@@ -410,22 +485,38 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             rtt_obj_3d_locs = []
             tgt_obj_3d_locs = []
             for r2t_obj_coords in r2t_objs_coords:
-                r2t_obj_3d_locs.append(torch.cat([coords[coords != 0].mean().unsqueeze(0) for coords in r2t_obj_coords]))
+                r2t_obj_3d_locs.append(
+                    torch.cat([coords[coords != 0].mean().unsqueeze(0) for coords in r2t_obj_coords])
+                )
             for rtt_obj_coords in rtt_objs_coords:
-                rtt_obj_3d_locs.append(torch.cat([coords[coords != 0].mean().unsqueeze(0) for coords in rtt_obj_coords]))
+                rtt_obj_3d_locs.append(
+                    torch.cat([coords[coords != 0].mean().unsqueeze(0) for coords in rtt_obj_coords])
+                )
             for tgt_obj_coords in tgt_objs_coords:
-                tgt_obj_3d_locs.append(torch.cat([coords[coords != 0].mean().unsqueeze(0) for coords in tgt_obj_coords]))
+                tgt_obj_3d_locs.append(
+                    torch.cat([coords[coords != 0].mean().unsqueeze(0) for coords in tgt_obj_coords])
+                )
             for obj_loc in tgt_obj_3d_locs:
-                objOs.append((ego_global_mat @ np.concatenate([obj_loc.detach().cpu().numpy(), np.array([1])]).reshape(4, 1))[:3].squeeze())
+                objOs.append(
+                    (ego_global_mat @ np.concatenate([obj_loc.detach().cpu().numpy(), np.array([1])]).reshape(4, 1))[
+                        :3
+                    ].squeeze()
+                )
             objHs_pred, objHs_comp = [], []
             for ii in range(len(obj_pose_inv)):
                 objHs_pred.append(
-                    (ego_global_mat @ np.concatenate([tgt_obj_3d_locs[ii].detach().cpu().numpy(), np.array([1])]).reshape(4, 1))[:3].squeeze()
+                    (
+                        ego_global_mat
+                        @ np.concatenate([tgt_obj_3d_locs[ii].detach().cpu().numpy(), np.array([1])]).reshape(4, 1)
+                    )[:3].squeeze()
                     + obj_vo_scale * obj_pose_inv[ii].detach().cpu().numpy()[:3]
                 )
             for ii in range(len(obj_pose_inv)):
                 objHs_comp.append(
-                    (ego_global_mat @ np.concatenate([tgt_obj_3d_locs[ii].detach().cpu().numpy(), np.array([1])]).reshape(4, 1))[:3].squeeze()
+                    (
+                        ego_global_mat
+                        @ np.concatenate([tgt_obj_3d_locs[ii].detach().cpu().numpy(), np.array([1])]).reshape(4, 1)
+                    )[:3].squeeze()
                     - obj_vo_scale * tr_fwd[0][ii].detach().cpu().numpy()
                 )
             for pred, comp in zip(objHs_pred, objHs_comp):
@@ -438,15 +529,23 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             r2t_obj_3d_loc_tr = r2t_obj_3d_loc.reshape(num_inst, 3) + r2t_obj_trans
             r2t_obj_3d_loc_tr_gt = r2t_obj_3d_loc.reshape(num_inst, 3) + r2t_obj_trans_gt
             r2t_obj_homo_tr, _ = cam2homo(
-                r2t_obj_3d_loc_tr.unsqueeze(-1).unsqueeze(-1), intrinsics.repeat(num_inst, 1, 1), torch.zeros([1, 3, 1]).cuda()
+                r2t_obj_3d_loc_tr.unsqueeze(-1).unsqueeze(-1),
+                intrinsics.repeat(num_inst, 1, 1),
+                torch.zeros([1, 3, 1]).cuda(),
             )
             r2t_obj_homo_tr_gt, _ = cam2homo(
-                r2t_obj_3d_loc_tr_gt.unsqueeze(-1).unsqueeze(-1), intrinsics.repeat(num_inst, 1, 1), torch.zeros([1, 3, 1]).cuda()
+                r2t_obj_3d_loc_tr_gt.unsqueeze(-1).unsqueeze(-1),
+                intrinsics.repeat(num_inst, 1, 1),
+                torch.zeros([1, 3, 1]).cuda(),
             )
             r2t_obj_head = r2t_obj_homo_tr.reshape(num_inst, 2).detach().cpu().numpy()
             r2t_obj_head_gt = r2t_obj_homo_tr_gt.reshape(num_inst, 2).detach().cpu().numpy()
             arr_scale = 1.5
-            r2t_obj = (r2t_obj_imgs[0].sum(dim=0) * 0.5 + 0.5).detach().cpu().numpy().transpose(1, 2, 0) if num_inst != 0 else np.zeros([256, 832, 3])
+            r2t_obj = (
+                (r2t_obj_imgs[0].sum(dim=0) * 0.5 + 0.5).detach().cpu().numpy().transpose(1, 2, 0)
+                if num_inst != 0
+                else np.zeros([256, 832, 3])
+            )
 
             i_w = ((IMDDs[sq][0] + obj_IMDDs[sq][0]) * 0.5 + 0.5)[bb].detach().cpu().numpy().transpose(1, 2, 0)
             m_w = obj_IMDDs[sq][1][0].repeat(3, 1, 1).detach().cpu().numpy().transpose(1, 2, 0)
@@ -472,13 +571,40 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             rtt_obj_coords = rtt_objs_coords.sum(dim=0, keepdim=True)
             tgt_obj_coords = tgt_objs_coords.sum(dim=0, keepdim=True)
             r2t_filter = (
-                np.abs(stats.zscore(r2t_obj_coords[bb, 2].view(-1)[r2t_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
+                np.abs(
+                    stats.zscore(
+                        r2t_obj_coords[bb, 2]
+                        .view(-1)[r2t_obj_coords[bb].mean(dim=0).view(-1) != 0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+                )
+                < th
             )
             rtt_filter = (
-                np.abs(stats.zscore(rtt_obj_coords[bb, 2].view(-1)[rtt_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
+                np.abs(
+                    stats.zscore(
+                        rtt_obj_coords[bb, 2]
+                        .view(-1)[rtt_obj_coords[bb].mean(dim=0).view(-1) != 0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+                )
+                < th
             )
             tgt_filter = (
-                np.abs(stats.zscore(tgt_obj_coords[bb, 2].view(-1)[tgt_obj_coords[bb].mean(dim=0).view(-1) != 0].detach().cpu().numpy())) < th
+                np.abs(
+                    stats.zscore(
+                        tgt_obj_coords[bb, 2]
+                        .view(-1)[tgt_obj_coords[bb].mean(dim=0).view(-1) != 0]
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+                )
+                < th
             )
             npts_r2t = int(r2t_filter.sum())
             npts_rtt = int(rtt_filter.sum())
@@ -653,7 +779,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         plt.text(
             130,
             250,
-            "*ego speed {:0.4f},  6-DoF {}".format(float(ego_pose[0, :3].pow(2).sum().sqrt()), ego_pose[0].detach().cpu().numpy().round(4)),
+            "*ego speed {:0.4f},  6-DoF {}".format(
+                float(ego_pose[0, :3].pow(2).sum().sqrt()), ego_pose[0].detach().cpu().numpy().round(4)
+            ),
             fontsize=7,
             bbox=bbox_b,
             ha="left",
@@ -663,7 +791,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.text(
                 7,
                 7,
-                "Obj-1: {:0.4f} {}".format(float(obj_pose[0, :3].pow(2).sum().sqrt()), obj_pose[0][:3].detach().cpu().numpy().round(4)),
+                "Obj-1: {:0.4f} {}".format(
+                    float(obj_pose[0, :3].pow(2).sum().sqrt()), obj_pose[0][:3].detach().cpu().numpy().round(4)
+                ),
                 fontsize=7,
                 bbox=bbox_m,
                 ha="left",
@@ -673,7 +803,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.text(
                 330,
                 7,
-                "#1: {:0.4f} {}".format(float(tr_fwd[0].pow(2).sum(dim=1).sqrt()[0]), tr_fwd[0][0].detach().cpu().numpy().round(4)),
+                "#1: {:0.4f} {}".format(
+                    float(tr_fwd[0].pow(2).sum(dim=1).sqrt()[0]), tr_fwd[0][0].detach().cpu().numpy().round(4)
+                ),
                 fontsize=7,
                 bbox=bbox_c,
                 ha="left",
@@ -683,7 +815,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.text(
                 7,
                 31,
-                "Obj-2: {:0.4f} {}".format(float(obj_pose[1, :3].pow(2).sum().sqrt()), obj_pose[1][:3].detach().cpu().numpy().round(4)),
+                "Obj-2: {:0.4f} {}".format(
+                    float(obj_pose[1, :3].pow(2).sum().sqrt()), obj_pose[1][:3].detach().cpu().numpy().round(4)
+                ),
                 fontsize=7,
                 bbox=bbox_m,
                 ha="left",
@@ -693,7 +827,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.text(
                 330,
                 31,
-                "#2: {:0.4f} {}".format(float(tr_fwd[0].pow(2).sum(dim=1).sqrt()[1]), tr_fwd[0][1].detach().cpu().numpy().round(4)),
+                "#2: {:0.4f} {}".format(
+                    float(tr_fwd[0].pow(2).sum(dim=1).sqrt()[1]), tr_fwd[0][1].detach().cpu().numpy().round(4)
+                ),
                 fontsize=7,
                 bbox=bbox_c,
                 ha="left",
@@ -703,7 +839,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.text(
                 7,
                 55,
-                "Obj-3: {:0.4f} {}".format(float(obj_pose[2, :3].pow(2).sum().sqrt()), obj_pose[2][:3].detach().cpu().numpy().round(4)),
+                "Obj-3: {:0.4f} {}".format(
+                    float(obj_pose[2, :3].pow(2).sum().sqrt()), obj_pose[2][:3].detach().cpu().numpy().round(4)
+                ),
                 fontsize=7,
                 bbox=bbox_m,
                 ha="left",
@@ -713,7 +851,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.text(
                 330,
                 55,
-                "#3: {:0.4f} {}".format(float(tr_fwd[0].pow(2).sum(dim=1).sqrt()[2]), tr_fwd[0][2].detach().cpu().numpy().round(4)),
+                "#3: {:0.4f} {}".format(
+                    float(tr_fwd[0].pow(2).sum(dim=1).sqrt()[2]), tr_fwd[0][2].detach().cpu().numpy().round(4)
+                ),
                 fontsize=7,
                 bbox=bbox_c,
                 ha="left",
@@ -723,7 +863,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.text(
                 7,
                 79,
-                "Obj-4: {:0.4f} {}".format(float(obj_pose[3, :3].pow(2).sum().sqrt()), obj_pose[3][:3].detach().cpu().numpy().round(4)),
+                "Obj-4: {:0.4f} {}".format(
+                    float(obj_pose[3, :3].pow(2).sum().sqrt()), obj_pose[3][:3].detach().cpu().numpy().round(4)
+                ),
                 fontsize=7,
                 bbox=bbox_m,
                 ha="left",
@@ -733,7 +875,9 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
             plt.text(
                 330,
                 79,
-                "#4: {:0.4f} {}".format(float(tr_fwd[0].pow(2).sum(dim=1).sqrt()[3]), tr_fwd[0][3].detach().cpu().numpy().round(4)),
+                "#4: {:0.4f} {}".format(
+                    float(tr_fwd[0].pow(2).sum(dim=1).sqrt()[3]), tr_fwd[0][3].detach().cpu().numpy().round(4)
+                ),
                 fontsize=7,
                 bbox=bbox_c,
                 ha="left",
@@ -885,7 +1029,14 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         ### 3d plot 1: cam-coord ###
         ax1 = fig.add_subplot(gs[3:5, 2:4], projection="3d")
         ax1_axfont = {"family": "sans", "size": 12, "weight": "heavy", "style": "italic", "color": "gray"}
-        ax1_titlefont = {"family": "sans", "size": 12, "color": "black", "ha": "center", "va": "bottom", "linespacing": 2}
+        ax1_titlefont = {
+            "family": "sans",
+            "size": 12,
+            "color": "black",
+            "ha": "center",
+            "va": "bottom",
+            "linespacing": 2,
+        }
         ax1_annotfont = {"family": "sans", "size": 8, "color": "black", "ha": "center", "va": "center"}
         ax1.scatter(X_r2t, Y_r2t, Z_r2t, c=C_r2t.transpose(1, 0), s=1, alpha=0.4)
         ax1.scatter(X_rtt, Y_rtt, Z_rtt, c=C_rtt.transpose(1, 0), s=1, alpha=0.6)
@@ -964,10 +1115,26 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         ax2 = fig.add_subplot(gs[1:5, 4:6], projection="3d")
         ax2_axfont = {"family": "sans", "size": 14, "weight": "heavy", "style": "italic", "color": "gray"}
         ax2_titlefont = {"family": "sans", "size": 12, "color": "black", "ha": "center", "va": "center"}
-        ax2.scatter(XYZ_global_tgt[:, 0, 0], XYZ_global_tgt[:, 1, 0], XYZ_global_tgt[:, 2, 0], c=C_global_tgt.transpose(1, 0), s=6, zorder=vidx + 1)
+        ax2.scatter(
+            XYZ_global_tgt[:, 0, 0],
+            XYZ_global_tgt[:, 1, 0],
+            XYZ_global_tgt[:, 2, 0],
+            c=C_global_tgt.transpose(1, 0),
+            s=6,
+            zorder=vidx + 1,
+        )
         for ii in range(len(egoOs) - 1):
             dR.drawVector(
-                ax2, egoOs[ii], egoOs[ii + 1], mutation_scale=1, alpha=0.5, arrowstyle="-", lineStyle=":", lineWidth=1, lineColor="k", zorder=vidx + 2
+                ax2,
+                egoOs[ii],
+                egoOs[ii + 1],
+                mutation_scale=1,
+                alpha=0.5,
+                arrowstyle="-",
+                lineStyle=":",
+                lineWidth=1,
+                lineColor="k",
+                zorder=vidx + 2,
             )
         for ii in range(len(egoOs)):
             if ii >= len(egoOs) - 1:
@@ -1060,20 +1227,29 @@ def demo_visualize(args, demo_loader, disp_net, ego_pose_net, obj_pose_net):
         azm = 1
         if "cityscapes" in args.data:
             ax2.view_init(elev=-0.01 - elv * vidx, azim=-90 + azm * vidx)
-            # ax2.view_init(elev=-0.01-elv*vidx, azim=-90.01-azm*vidx)
         else:
             if vidx <= 10:
                 ax2.view_init(elev=-0.01 - elv * vidx, azim=-90 + azm * vidx)  # elev: -0~-40, azim: -90~-70
             if 10 < vidx and vidx <= 20:
-                ax2.view_init(elev=-0.01 - elv * 10 + elv * (vidx - 10), azim=-90 + azm * 10 - azm * (vidx - 10))  # elev: -40~-0, azim: -70~-90
+                ax2.view_init(
+                    elev=-0.01 - elv * 10 + elv * (vidx - 10), azim=-90 + azm * 10 - azm * (vidx - 10)
+                )  # elev: -40~-0, azim: -70~-90
             if 20 < vidx and vidx <= 30:
-                ax2.view_init(elev=-0.01 - elv * (vidx - 20), azim=-90 - azm * (vidx - 20))  # elev: -0~-40, azim: -90~-110
+                ax2.view_init(
+                    elev=-0.01 - elv * (vidx - 20), azim=-90 - azm * (vidx - 20)
+                )  # elev: -0~-40, azim: -90~-110
             if 30 < vidx and vidx <= 40:
-                ax2.view_init(elev=-0.01 - elv * 10 + elv * (vidx - 30), azim=-90 - azm * 10 + azm * (vidx - 30))  # elev: -40~-0, azim: -110~-90
+                ax2.view_init(
+                    elev=-0.01 - elv * 10 + elv * (vidx - 30), azim=-90 - azm * 10 + azm * (vidx - 30)
+                )  # elev: -40~-0, azim: -110~-90
             if 40 < vidx and vidx <= 50:
-                ax2.view_init(elev=-0.01 - elv * (vidx - 40), azim=-90 + azm * (vidx - 40))  # elev: -0~-40, azim: -90~-70
+                ax2.view_init(
+                    elev=-0.01 - elv * (vidx - 40), azim=-90 + azm * (vidx - 40)
+                )  # elev: -0~-40, azim: -90~-70
             if 50 < vidx and vidx <= 60:
-                ax2.view_init(elev=-0.01 - elv * 10 + elv * (vidx - 50), azim=-90 + azm * 10 - azm * (vidx - 50))  # elev: -40~-0, azim: -70~-90
+                ax2.view_init(
+                    elev=-0.01 - elv * 10 + elv * (vidx - 50), azim=-90 + azm * 10 - azm * (vidx - 50)
+                )  # elev: -40~-0, azim: -70~-90
         ax2.dist = 10 + 0.1 * vidx
         ax2_title = fig.add_subplot(gs[4, 4:6])
         ax2_title.axis("off")
@@ -1135,8 +1311,12 @@ def find_noc_masks(fwd_flow, bwd_flow):
     fwd_consist_bound = torch.max(0.05 * L2_norm(fwd_flow), torch.Tensor([3.0]))
     bwd_consist_bound = torch.max(0.05 * L2_norm(bwd_flow), torch.Tensor([3.0]))
 
-    noc_mask_0 = (L2_norm(fwd_flow_diff) < fwd_consist_bound).type(torch.FloatTensor)  # noc_mask_tgt, torch.Size([1, 1, 256, 832]), torch.float32
-    noc_mask_1 = (L2_norm(bwd_flow_diff) < bwd_consist_bound).type(torch.FloatTensor)  # noc_mask_src, torch.Size([1, 1, 256, 832]), torch.float32
+    noc_mask_0 = (L2_norm(fwd_flow_diff) < fwd_consist_bound).type(
+        torch.FloatTensor
+    )  # noc_mask_tgt, torch.Size([1, 1, 256, 832]), torch.float32
+    noc_mask_1 = (L2_norm(bwd_flow_diff) < bwd_consist_bound).type(
+        torch.FloatTensor
+    )  # noc_mask_src, torch.Size([1, 1, 256, 832]), torch.float32
 
     return noc_mask_0, noc_mask_1
 
@@ -1166,9 +1346,17 @@ def inst_iou(seg_src, seg_tgt, valid_mask):
 
         # iou_inst: torch.Size([n_tgt_inst])
         overlap = (
-            (seg_src_m[:, i].unsqueeze(1).repeat(1, n_inst_tgt, 1, 1) * seg_tgt_m).clamp(min=0, max=1).squeeze(0).sum(dim=(1, 2))
+            (seg_src_m[:, i].unsqueeze(1).repeat(1, n_inst_tgt, 1, 1) * seg_tgt_m)
+            .clamp(min=0, max=1)
+            .squeeze(0)
+            .sum(dim=(1, 2))
         )  # H,Wで合計してIoU面積を出す
-        union = (seg_src_m[:, i].unsqueeze(1).repeat(1, n_inst_tgt, 1, 1) + seg_tgt_m).clamp(min=0, max=1).squeeze(0).sum(dim=(1, 2))
+        union = (
+            (seg_src_m[:, i].unsqueeze(1).repeat(1, n_inst_tgt, 1, 1) + seg_tgt_m)
+            .clamp(min=0, max=1)
+            .squeeze(0)
+            .sum(dim=(1, 2))
+        )
         iou_inst = overlap / union
         match_table = torch.cat((match_table, iou_inst.unsqueeze(0)), dim=0)
     # ここでは各srcインスタンスから見て最大のIoUを取るオブジェクトを同じオブジェクトとして計算してしまっているから，1つのtgtに対して複数のsrcが対応付けられてしまっている．
@@ -1188,8 +1376,12 @@ def recursive_check_nonzero_inst(tgt_inst, ref_inst):
                 tgt_inst[nn + 1 :] = 0
                 ref_inst[nn + 1 :] = 0
             else:
-                tgt_inst[nn + 1 :] = torch.cat([tgt_inst[nn + 2 :], torch.zeros(1, tgt_inst.size(1), tgt_inst.size(2))], dim=0)  # re-ordering
-                ref_inst[nn + 1 :] = torch.cat([ref_inst[nn + 2 :], torch.zeros(1, ref_inst.size(1), ref_inst.size(2))], dim=0)  # re-ordering
+                tgt_inst[nn + 1 :] = torch.cat(
+                    [tgt_inst[nn + 2 :], torch.zeros(1, tgt_inst.size(1), tgt_inst.size(2))], dim=0
+                )  # re-ordering
+                ref_inst[nn + 1 :] = torch.cat(
+                    [ref_inst[nn + 2 :], torch.zeros(1, ref_inst.size(1), ref_inst.size(2))], dim=0
+                )  # re-ordering
             return recursive_check_nonzero_inst(tgt_inst, ref_inst)
         if ref_inst[nn + 1].mean() == 0:
             tgt_inst[0] -= 1
@@ -1198,8 +1390,12 @@ def recursive_check_nonzero_inst(tgt_inst, ref_inst):
                 tgt_inst[nn + 1 :] = 0
                 ref_inst[nn + 1 :] = 0
             else:
-                tgt_inst[nn + 1 :] = torch.cat([tgt_inst[nn + 2 :], torch.zeros(1, tgt_inst.size(1), tgt_inst.size(2))], dim=0)  # re-ordering
-                ref_inst[nn + 1 :] = torch.cat([ref_inst[nn + 2 :], torch.zeros(1, ref_inst.size(1), ref_inst.size(2))], dim=0)  # re-ordering
+                tgt_inst[nn + 1 :] = torch.cat(
+                    [tgt_inst[nn + 2 :], torch.zeros(1, tgt_inst.size(1), tgt_inst.size(2))], dim=0
+                )  # re-ordering
+                ref_inst[nn + 1 :] = torch.cat(
+                    [ref_inst[nn + 2 :], torch.zeros(1, ref_inst.size(1), ref_inst.size(2))], dim=0
+                )  # re-ordering
             return recursive_check_nonzero_inst(tgt_inst, ref_inst)
     return tgt_inst, ref_inst
 

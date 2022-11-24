@@ -1,7 +1,7 @@
 # Mostly based on the code written by Clement Godard:
 # https://github.com/mrharicot/monodepth/blob/master/utils/evaluation_utils.py
-import os
 from collections import Counter
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -75,14 +75,12 @@ def convert_disps_to_depths_kitti(gt_disparities, pred_disparities):
 
 
 def read_text_lines(file_path):
-    f = open(file_path, "r")
-    lines = f.readlines()
-    f.close()
-    lines = [l.rstrip() for l in lines]
-    return lines
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+    return [line.rstrip() for line in lines]
 
 
-def read_file_data(files, data_root):
+def read_file_data(files: list[str], data_root: Path):
     gt_files = []
     gt_calib = []
     im_sizes = []
@@ -95,22 +93,19 @@ def read_file_data(files, data_root):
         # camera_id = filename[-1]   # 2 is left, 3 is right
         date = splits[0]
         im_id = splits[4][:10]
-        file_root = "{}/{}"
 
         im = filename
-        # pdb.set_trace()
         vel = "{}/{}/velodyne_points/data/{}.bin".format(splits[0], splits[1], im_id)
 
-        if os.path.isfile(data_root + im):
-            gt_files.append(data_root + vel)
-            gt_calib.append(data_root + date + "/")
-            im_sizes.append(cv2.imread(data_root + im).shape[:2])
-            im_files.append(data_root + im)
+        if (data_root / im).is_file():
+            gt_files.append(data_root / vel)
+            gt_calib.append(data_root / date)
+            im_sizes.append(cv2.imread(str(data_root / im)).shape[:2])
+            im_files.append(data_root / im)
             cams.append(2)
         else:
             num_probs += 1
-            print("{} missing".format(data_root + im))
-    # print(num_probs, 'files missing')
+            print("{} missing".format(data_root / im))
 
     return gt_files, gt_calib, im_sizes, im_files, cams
 
@@ -133,7 +128,7 @@ def lin_interp(shape, xyd):
     return disparity
 
 
-def read_calib_file(path):
+def read_calib_file(path: Path):
     # taken from https://github.com/hunse/kitti
     float_chars = set("0123456789.e+- ")
     data = {}
@@ -151,12 +146,11 @@ def read_calib_file(path):
                 except ValueError:
                     # casting error: data[key] already eq. value, so pass
                     pass
-
     return data
 
 
-def get_focal_length_baseline(calib_dir, cam=2):
-    cam2cam = read_calib_file(calib_dir + "calib_cam_to_cam.txt")
+def get_focal_length_baseline(calib_dir: Path, cam=2):
+    cam2cam = read_calib_file(calib_dir / "calib_cam_to_cam.txt")
     P2_rect = cam2cam["P_rect_02"].reshape(3, 4)
     P3_rect = cam2cam["P_rect_03"].reshape(3, 4)
 
@@ -170,7 +164,6 @@ def get_focal_length_baseline(calib_dir, cam=2):
         focal_length = P2_rect[0, 0]
     elif cam == 3:
         focal_length = P3_rect[0, 0]
-
     return focal_length, baseline
 
 
@@ -179,10 +172,10 @@ def sub2ind(matrixSize, rowSub, colSub):
     return rowSub * (n - 1) + colSub - 1
 
 
-def generate_depth_map(calib_dir, velo_file_name, im_shape, cam=2, interp=False, vel_depth=False):
+def generate_depth_map(calib_dir: Path, velo_file_name, im_shape, cam=2, interp=False, vel_depth=False):
     # load calibration files
-    cam2cam = read_calib_file(calib_dir + "calib_cam_to_cam.txt")
-    velo2cam = read_calib_file(calib_dir + "calib_velo_to_cam.txt")
+    cam2cam = read_calib_file(calib_dir / "calib_cam_to_cam.txt")
+    velo2cam = read_calib_file(calib_dir / "calib_velo_to_cam.txt")
     # pdb.set_trace()
     velo2cam = np.hstack((velo2cam["R"].reshape(3, 3), velo2cam["T"][..., np.newaxis]))
     velo2cam = np.vstack((velo2cam, np.array([0, 0, 0, 1.0])))
