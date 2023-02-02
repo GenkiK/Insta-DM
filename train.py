@@ -33,7 +33,7 @@ import models
 from datasets.my_sequence_folders import SequenceFolderWithEgoPose
 from logger import AverageMeter, TermLogger
 from loss_functions import (
-    compute_errors,
+    compute_errors_without_scaling,
     compute_mof_consistency_loss,
     compute_obj_size_constraint_loss,
     compute_photo_and_geometry_loss,
@@ -460,6 +460,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         ]
         tgt_obj_masks = [1 - mask for mask in tgt_bg_masks]
         ref_obj_masks = [1 - mask for mask in ref_bg_masks]
+        # ここでinstsの0番目の要素（num_match）が必要になる．
         num_insts = [
             tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts
         ]  # Number of instances for each sequence
@@ -923,12 +924,12 @@ def validate_with_gt(args, val_loader, disp_net, epoch, logger):
         output_disp = disp_net(tgt_img)
         output_depth = 1 / output_disp[:, 0]
 
-        error_all, med_scale = compute_errors(depth, output_depth)
+        error_all, med_scale = compute_errors_without_scaling(depth, output_depth)
         errors.update(error_all)
 
-        errors_bg.update(compute_errors(depth_bg, output_depth, med_scale)[0])
+        errors_bg.update(compute_errors_without_scaling(depth_bg, output_depth, med_scale)[0])
         if fg_ratio:
-            errors_fg.update(compute_errors(depth_fg, output_depth, med_scale)[0])
+            errors_fg.update(compute_errors_without_scaling(depth_fg, output_depth, med_scale)[0])
         # pdb.set_trace()
 
         # measure elapsed time

@@ -29,25 +29,7 @@ def load_flo_as_float(path):
 
 def load_seg_and_category_as_tensor(path):
     npz = np.load(path)
-    masks = torch.from_numpy(npz["masks"].astype(np.float32))
-    labels = torch.from_numpy(npz["labels"].astype(np.int32))
-    return masks, labels
-
-
-# def load_seg_and_category_as_tensor(path):
-#     npz = np.load(path)
-#     masks = torch.from_numpy(npz["masks"].astype(np.float32))
-#     labels = torch.from_numpy(npz["labels"].astype(np.int32))
-#     # 背景を追加
-#     # maskがmaskが[[]]みたいなときに死ぬからハードコーディングしているけど修正する．
-#     if masks.squeeze().shape[0] == 0:
-#         masks = torch.zeros((1, 256, 832), dtype=torch.float32)
-#         labels = torch.tensor([-1], dtype=torch.int32)
-#     else:
-#         masks = torch.cat((torch.zeros_like(masks[0])[None, :, :], masks), dim=0)
-#         # 背景のカテゴリーIDは-1
-#         labels = torch.cat((torch.tensor([-1], dtype=torch.int32), labels))
-#     return masks, labels
+    return torch.from_numpy(npz["masks"].astype(np.float32)), torch.from_numpy(npz["labels"].astype(np.uint8))
 
 
 def L2_norm(x, dim=1, keepdim=True):
@@ -209,7 +191,7 @@ class SequenceFolder(data.Dataset):
             scene_img_dir = root_dir / "image" / scene_name
             scene_flof_dir = root_dir / "flow_f" / scene_name
             scene_flob_dir = root_dir / "flow_b" / scene_name
-            scene_segm_dir = root_dir / "segmentation_OneFormer_modified" / scene_name
+            scene_segm_dir = root_dir / "segmentation_OneFormer" / scene_name
             intrinsics = np.genfromtxt(scene_img_dir / "cam.txt").astype(np.float32).reshape(3, 3)
 
             img_paths = sorted(scene_img_dir.glob("*.jpg"))
@@ -250,97 +232,113 @@ class SequenceFolder(data.Dataset):
         flow_bs = [torch.from_numpy(load_flo_as_float(flow_b)) for flow_b in sample["flow_bs"]]
 
         tgt_seg, tgt_inst_labels = load_seg_and_category_as_tensor(sample["tgt_seg"])
-        # ref_segs, ref_insts_labels = [load_seg_and_category_as_tensor(path) for path in sample["ref_segs"]]
-        ref_segs, ref_insts_labels = [], []
-        for seg_path in sample["ref_segs"]:
-            ref_seg, ref_insts_label = load_seg_and_category_as_tensor(seg_path)
-            ref_segs.append(ref_seg)
-            ref_insts_labels.append(ref_insts_label)
+        ref_segs, ref_insts_labels = [load_seg_and_category_as_tensor(path) for path in sample["ref_segs"]]
 
-        tgt_insts = []
-        ref_insts = []
-        tgt_insts_matched_labels = []
-        ref_insts_matched_labels = []
-        tgt_sort = torch.cat([torch.zeros(1).long(), tgt_seg.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)
-        tgt_seg = tgt_seg[tgt_sort]
-        tgt_inst_labels = tgt_inst_labels[tgt_sort]
+        if tgt_seg.shape[0] > 0:
+            tgt_insts = []
+            ref_insts = []
+            tgt_insts_matched_labels = []
+            ref_insts_matched_labels = []
+            tgt_sort = torch.cat([torch.zeros(1).long(), tgt_seg.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)
+            tgt_seg = tgt_seg[tgt_sort]
+            tgt_inst_labels = tgt_inst_labels[tgt_sort]
 
-        ref_sorts = [
-            torch.cat([torch.zeros(1).long(), ref_seg.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0)
-            for ref_seg in ref_segs
-        ]
-        ref_segs = [ref_seg[ref_sort] for ref_seg, ref_sort in zip(ref_segs, ref_sorts)]
-        ref_insts_labels = [ref_insts_label[ref_sort] for ref_insts_label, ref_sort in zip(ref_insts_labels, ref_sorts)]
-        # ref_sorts = [torch.cat([torch.zeros(1).long(), ref_seg.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0) for ref_seg in ref_segs if ]
-        # tgt_seg, ref_segはセグメンテーション領域が大きい順にインスタンスがch方向に並んでる
-        # ref_segs_sorted = [ref_seg[ref_sort] for ref_seg, ref_sort in zip(ref_segs_sorted, ref_sorts)]
+            tmp_ref_segs = []
+            tmp_ref_insts_labels = []
+            for ref_seg, ref_category in zip(ref_segs, ref_insts_labels):
+                if ref_seg.shape[0] > 0:
+                    ref_sort = torch.cat(
+                        [torch.zeros(1).long(), ref_seg.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0
+                    )
+                    tmp_ref_segs.append(ref_seg[ref_sort])
+                    tmp_ref_insts_labels.append(ref_category[ref_sort])
+                else:
+                    tmp_ref_segs.append(ref_seg)
+                    tmp_ref_insts_labels.append(ref_category)
+            ref_segs = tmp_ref_segs
+            ref_insts_labels = tmp_ref_insts_labels
+            # ref_sorts = [torch.cat([torch.zeros(1).long(), ref_seg.sum(dim=(1, 2)).argsort(descending=True)[:-1]], dim=0) for ref_seg in ref_segs if ]
+            # tgt_seg, ref_segはセグメンテーション領域が大きい順にインスタンスがch方向に並んでる
+            # ref_segs_sorted = [ref_seg[ref_sort] for ref_seg, ref_sort in zip(ref_segs_sorted, ref_sorts)]
 
-        for i in range(len(ref_imgs)):
-            # この中ではref_imgs[i]の1枚とtgtのみを比較
-            noc_f, noc_b = find_noc_masks(flow_fs[i].unsqueeze(0), flow_bs[i].unsqueeze(0))
-            if i < len(ref_imgs) / 2:  # first half
-                seg0 = ref_segs[i].unsqueeze(0)
-                labels0 = ref_insts_labels[i]
-                seg1 = tgt_seg.unsqueeze(0)
-                labels1 = tgt_inst_labels
-            else:  # second half
-                seg0 = tgt_seg.unsqueeze(0)
-                labels0 = tgt_inst_labels
-                seg1 = ref_segs[i].unsqueeze(0)
-                labels1 = ref_insts_labels[i]
+            for i in range(len(ref_imgs)):
+                if len(ref_segs[i]) == 0:
+                    # HACK: マッチしなかった場合のインスタンスのカテゴリーは-1とする
+                    tgt_insts.append(np.zeros((tgt_img.shape[0], tgt_img.shape[1], self.mni + 1)))
+                    ref_insts.append(np.zeros((tgt_img.shape[0], tgt_img.shape[1], self.mni + 1)))
+                    tgt_insts_matched_labels.append(-np.ones(self.mni))
+                    ref_insts_matched_labels.append(-np.ones(self.mni))
+                    continue
+                # この中ではref_imgs[i]の1枚とtgtのみを比較
+                noc_f, noc_b = find_noc_masks(flow_fs[i].unsqueeze(0), flow_bs[i].unsqueeze(0))
+                if i < len(ref_imgs) / 2:  # first half
+                    seg0 = ref_segs[i].unsqueeze(0)
+                    labels0 = ref_insts_labels[i]
+                    seg1 = tgt_seg.unsqueeze(0)
+                    labels1 = tgt_inst_labels
+                else:  # second half
+                    seg0 = tgt_seg.unsqueeze(0)
+                    labels0 = tgt_inst_labels
+                    seg1 = ref_segs[i].unsqueeze(0)
+                    labels1 = ref_insts_labels[i]
 
-            seg0w, _ = flow_warp(seg1, flow_fs[i].unsqueeze(0))
-            seg1w, _ = flow_warp(seg0, flow_bs[i].unsqueeze(0))
-            # warped_seg0_from_seg1, _ = flow_warp(seg1, flow_fs[i].unsqueeze(0))
-            # warped_seg1_from_seg0, _ = flow_warp(seg0, flow_bs[i].unsqueeze(0))
+                seg0w, _ = flow_warp(seg1, flow_fs[i].unsqueeze(0))
+                seg1w, _ = flow_warp(seg0, flow_bs[i].unsqueeze(0))
+                # warped_seg0_from_seg1, _ = flow_warp(seg1, flow_fs[i].unsqueeze(0))
+                # warped_seg1_from_seg0, _ = flow_warp(seg0, flow_bs[i].unsqueeze(0))
 
-            n_inst0 = seg0.shape[1]
+                n_inst0 = seg0.shape[1]
 
-            # Warp seg0 to seg1. Find IoU between seg1w and seg1. Find the maximum corresponded instance in seg1.
-            # たぶんch_01はseg0(ref)の各オブジェクトについて最大のIoUをとるseg1(tgt)のインスタンスのidxが並んでる
-            iou_01, ch_01 = inst_iou(seg1w, seg1, valid_mask=noc_b)
-            iou_10, ch_10 = inst_iou(seg0w, seg0, valid_mask=noc_f)
+                # Warp seg0 to seg1. Find IoU between seg1w and seg1. Find the maximum corresponded instance in seg1.
+                # たぶんch_01はseg0(ref)の各オブジェクトについて最大のIoUをとるseg1(tgt)のインスタンスのidxが並んでる
+                iou_01, ch_01 = inst_iou(seg1w, seg1, valid_mask=noc_b)
+                iou_10, ch_10 = inst_iou(seg0w, seg0, valid_mask=noc_f)
 
-            seg0_re = torch.zeros(self.mni + 1, seg0.shape[2], seg0.shape[3])  # seg.shape[2:] == [H, W]
-            seg1_re = torch.zeros(self.mni + 1, seg1.shape[2], seg1.shape[3])
-            labels0_re = -np.ones(self.mni, dtype=np.int32)
-            labels1_re = -np.ones(self.mni, dtype=np.int32)
-            non_overlap_0 = torch.ones([seg0.shape[2], seg0.shape[3]])
-            non_overlap_1 = torch.ones([seg0.shape[2], seg0.shape[3]])
+                seg0_re = torch.zeros(self.mni + 1, seg0.shape[2], seg0.shape[3])  # seg.shape[2:] == [H, W]
+                seg1_re = torch.zeros(self.mni + 1, seg1.shape[2], seg1.shape[3])
+                labels0_re = -np.ones(self.mni, dtype=np.int8)
+                labels1_re = -np.ones(self.mni, dtype=np.int8)
+                non_overlap_0 = torch.ones([seg0.shape[2], seg0.shape[3]])
+                non_overlap_1 = torch.ones([seg0.shape[2], seg0.shape[3]])
 
-            num_match = 0
-            for ch in range(n_inst0):
-                condition1 = labels0[ch] == labels1[ch_01[ch]]
-                condition2 = (ch == ch_10[ch_01[ch]]) and (iou_01[ch] > 0.5) and (iou_10[ch_01[ch]] > 0.5)
-                condition3 = ((seg0[0, ch] * non_overlap_0).max() > 0) and (
-                    (seg1[0, ch_01[ch]] * non_overlap_1).max() > 0
-                )
-                if condition1 and condition2 and condition3 and (num_match < self.mni):  # matching success!
-                    num_match += 1
-                    # マッチ数がインデックス＝どんどんassociationできたinstance(ch)をappendしていってるイメージ
-                    seg0_re[num_match] = seg0[0, ch] * non_overlap_0
-                    seg1_re[num_match] = seg1[0, ch_01[ch]] * non_overlap_1
-                    labels0_re[num_match - 1] = labels0[ch]
-                    labels1_re[num_match - 1] = labels0[ch]
-                    non_overlap_0 = non_overlap_0 * (1 - seg0_re[num_match])
-                    non_overlap_1 = non_overlap_1 * (1 - seg1_re[num_match])
-            seg0_re[0] = num_match
-            seg1_re[0] = num_match
+                num_match = 0
+                for ch in range(n_inst0):
+                    condition1 = labels0[ch] == labels1[ch_01[ch]]
+                    condition2 = (ch == ch_10[ch_01[ch]]) and (iou_01[ch] > 0.5) and (iou_10[ch_01[ch]] > 0.5)
+                    condition3 = ((seg0[0, ch] * non_overlap_0).max() > 0) and (
+                        (seg1[0, ch_01[ch]] * non_overlap_1).max() > 0
+                    )
+                    if condition1 and condition2 and condition3 and (num_match < self.mni):  # matching success!
+                        num_match += 1
+                        # マッチ数がインデックス＝どんどんassociationできたinstance(ch)をappendしていってるイメージ
+                        seg0_re[num_match] = seg0[0, ch] * non_overlap_0
+                        seg1_re[num_match] = seg1[0, ch_01[ch]] * non_overlap_1
+                        labels0_re[num_match] = labels0[ch]
+                        labels1_re[num_match] = labels0[ch]
+                        non_overlap_0 = non_overlap_0 * (1 - seg0_re[num_match])
+                        non_overlap_1 = non_overlap_1 * (1 - seg1_re[num_match])
+                seg0_re[0] = num_match
+                seg1_re[0] = num_match
 
-            # この時点でlabelsにはbackgroundの要素が含まれていない
-            if i < len(ref_imgs) / 2:  # first half
-                tgt_insts.append(seg1_re.detach().cpu().numpy().transpose(1, 2, 0))
-                ref_insts.append(seg0_re.detach().cpu().numpy().transpose(1, 2, 0))
-                tgt_insts_matched_labels.append(labels1_re)
-                ref_insts_matched_labels.append(labels0_re)
-            else:  # second half
-                tgt_insts.append(seg0_re.detach().cpu().numpy().transpose(1, 2, 0))
-                ref_insts.append(seg1_re.detach().cpu().numpy().transpose(1, 2, 0))
-                tgt_insts_matched_labels.append(labels0_re)
-                ref_insts_matched_labels.append(labels1_re)
-            # tgt_insts: [[ref_imgs[0]に対してassociationできたtgt内のインスタンス最大20個], [ref_imgs[1]...], ...]
-            # tgt_insts: list[torch.Size([H, W, max_num_insts])]
-            # ref_insts: [[ref_imgs[0]とtgtを見比べてassociationできたref_imgs[0]内のインスタンス最大20個], [ref_imgs[1]...], ...]
+                if i < len(ref_imgs) / 2:  # first half
+                    tgt_insts.append(seg1_re.detach().cpu().numpy().transpose(1, 2, 0))
+                    ref_insts.append(seg0_re.detach().cpu().numpy().transpose(1, 2, 0))
+                    tgt_insts_matched_labels.append(labels1_re)
+                    ref_insts_matched_labels.append(labels0_re)
+                else:  # second half
+                    tgt_insts.append(seg0_re.detach().cpu().numpy().transpose(1, 2, 0))
+                    ref_insts.append(seg1_re.detach().cpu().numpy().transpose(1, 2, 0))
+                    tgt_insts_matched_labels.append(labels0_re)
+                    ref_insts_matched_labels.append(labels1_re)
+                # tgt_insts: [[ref_imgs[0]に対してassociationできたtgt内のインスタンス最大20個], [ref_imgs[1]...], ...]
+                # tgt_insts: list[torch.Size([H, W, max_num_insts])]
+                # ref_insts: [[ref_imgs[0]とtgtを見比べてassociationできたref_imgs[0]内のインスタンス最大20個], [ref_imgs[1]...], ...]
+
+        else:  # tgt_instが存在しなかった場合
+            tgt_insts = [np.zeros((tgt_img.shape[0], tgt_img.shape[1], self.mni + 1)) for _ in range(len(ref_imgs))]
+            ref_insts = [np.zeros((tgt_img.shape[0], tgt_img.shape[1], self.mni + 1)) for _ in range(len(ref_imgs))]
+            tgt_insts_matched_labels = [-np.ones(self.mni) for _ in range(len(ref_imgs))]
+            ref_insts_matched_labels = [-np.ones(self.mni) for _ in range(len(ref_imgs))]
         intrinsics = np.copy(sample["intrinsics"])
         if self.transform is not None:
             imgs, segms, intrinsics = self.transform([tgt_img] + ref_imgs, tgt_insts + ref_insts, intrinsics)

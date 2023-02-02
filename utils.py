@@ -149,7 +149,7 @@ def tensor2array(tensor, max_value=None, colormap="rainbow"):
 def save_checkpoint(
     epoch,
     save_freq,
-    save_path,
+    save_dir,
     dispnet_state,
     ego_pose_state,
     obj_pose_state,
@@ -160,16 +160,16 @@ def save_checkpoint(
     file_prefixes = ["dispnet", "ego_pose", "obj_pose", "optim"]
     states = [dispnet_state, ego_pose_state, obj_pose_state, optim_state]
     for (prefix, state) in zip(file_prefixes, states):
-        torch.save(state, save_path / "{}_{}".format(prefix, filename))
+        torch.save(state, save_dir / "{}_{}".format(prefix, filename))
 
     if epoch % save_freq == 0:
         for (prefix, state) in zip(file_prefixes, states):
-            torch.save(state, save_path / "{}_{}_{}".format(prefix, epoch, filename))
+            torch.save(state, save_dir / "{}_{}_{}".format(prefix, epoch, filename))
 
     if is_best:
         for prefix in file_prefixes:
             shutil.copyfile(
-                save_path / "{}_{}".format(prefix, filename), save_path / "{}_model_best.pth.tar".format(prefix)
+                save_dir / "{}_{}".format(prefix, filename), save_dir / "{}_model_best.pth.tar".format(prefix)
             )
 
 

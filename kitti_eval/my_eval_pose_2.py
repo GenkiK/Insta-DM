@@ -156,7 +156,7 @@ if __name__ == "__main__":
     parser.add_argument("--gt-dir", type=Path, required=True, help="Test dataset directory")
     parser.add_argument("--result", type=Path, required=True, help="Result directory")
     parser.add_argument(
-        "--align", type=str, choices=["scale", "scale_7dof", "7dof", "6dof"], default="7dof", help="alignment type"
+        "--align", type=str, choices=["scale", "scale_7dof", "7dof", "6dof"], default="6dof", help="alignment type"
     )
     parser.add_argument("--seqs", nargs="+", type=int, help="sequences to be evaluated", default=None)
     args = parser.parse_args()

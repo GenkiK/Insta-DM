@@ -28,19 +28,23 @@ def flow_read(filename):
 
     Original code by Deqing Sun, adapted from Daniel Scharstein.
     """
-    f = open(filename, "rb")
-    check = np.fromfile(f, dtype=np.float32, count=1)[0]
-    assert check == TAG_FLOAT, " flow_read:: Wrong tag in flow file (should be: {0}, is: {1}). Big-endian machine? ".format(TAG_FLOAT, check)
-    width = np.fromfile(f, dtype=np.int32, count=1)[0]
-    height = np.fromfile(f, dtype=np.int32, count=1)[0]
-    size = width * height
-    assert width > 0 and height > 0 and size > 1 and size < 100000000, " flow_read:: Wrong input size (width = {0}, height = {1}).".format(
-        width, height
-    )
-    tmp = np.fromfile(f, dtype=np.float32, count=-1).reshape((height, width * 2))
-    u = tmp[:, np.arange(width) * 2]
-    v = tmp[:, np.arange(width) * 2 + 1]
-    return u, v
+    with open(filename, "rb") as f:
+        check = np.fromfile(f, dtype=np.float32, count=1)[0]
+        assert (
+            check == TAG_FLOAT
+        ), " flow_read:: Wrong tag in flow file (should be: {0}, is: {1}). Big-endian machine? ".format(
+            TAG_FLOAT, check
+        )
+        width = np.fromfile(f, dtype=np.int32, count=1)[0]
+        height = np.fromfile(f, dtype=np.int32, count=1)[0]
+        size = width * height
+        assert (
+            width > 0 and height > 0 and size > 1 and size < 100000000
+        ), " flow_read:: Wrong input size (width = {0}, height = {1}).".format(width, height)
+        tmp = np.fromfile(f, dtype=np.float32, count=-1).reshape((height, width * 2))
+        u = tmp[:, np.arange(width) * 2]
+        v = tmp[:, np.arange(width) * 2 + 1]
+        return u, v
 
 
 def flow_write(filename, uv, v=None):

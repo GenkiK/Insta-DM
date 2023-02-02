@@ -244,7 +244,6 @@ def compute_smooth_loss(tgt_depth, tgt_img, ref_depths, ref_imgs):
 
 def compute_obj_category_size_constraint_loss(
     height_priors,
-    height_var_priors,
     tgtD,
     seq_tgtMs,
     seq_tgt_labels,
@@ -262,80 +261,227 @@ def compute_obj_category_size_constraint_loss(
         num_inst: [n1, n2, ...]
         intrinsics.shape: torch.Size([B, 3, 3])
     """
-    batch_size, _, hh, ww = tgtD.size()
+    bs, _, hh, ww = tgtD.size()
 
     loss = torch.tensor(0.0).cuda()
 
     for batch_tgtM, batch_tgt_labels, batch_refD, batch_refM, batch_ref_labels, batch_num_inst in zip(
         seq_tgtMs, seq_tgt_labels, seq_refDs, seq_refMs, seq_ref_labels, seq_num_insts
     ):
+        # batch_tgtM: [bs,max_num_insts+1,h,w]
+        # batch_tgt_labels: [bs, max_num_insts]
+        # batch_refD: [bs,1,h,w]
+        # batch_ref_labels: [bs, max_num_insts]
+        # len(batch_num_inst) == bs
+
         if sum(batch_num_inst) != 0:
-            fy_rep = batch_intrinsics[:, 1, 1].repeat_interleave(max_num_insts, dim=0)
+            fy_repeat = batch_intrinsics[:, 1, 1].repeat_interleave(max_num_insts, dim=0)
 
             ### tgt-frame ###
-            tgtD_rep = tgtD.repeat_interleave(max_num_insts, dim=0)
-            batch_tgtD_avg = tgtD_rep.mean(dim=[1, 2, 3])
-            tgtM_rep = batch_tgtM[:, 1:].reshape(-1, 1, hh, ww)
-            batch_tgtD_obj = (tgtD_rep * tgtM_rep).sum(dim=[1, 2, 3]) / tgtM_rep.sum(dim=[1, 2, 3]).clamp(min=1e-9)
-            tgtM_idx = np.where(tgtM_rep.detach().cpu().numpy() == 1)
-            batch_tgtH_obj = torch.tensor(
+            tgtD_repeat = tgtD.repeat_interleave(max_num_insts, dim=0)  # [bs * max_num_insts,1,h,w]
+            # num_matchの行列をスキップ
+            tgtM_repeat = batch_tgtM[:, 1:].reshape(-1, 1, hh, ww)  # [bs * max_num_insts,1,h,w]
+            batch_tgtD_obj = (tgtD_repeat * tgtM_repeat).sum(dim=[1, 2, 3]) / tgtM_repeat.sum(dim=[1, 2, 3]).clamp(
+                min=1e-9
+            )
+            tgtM_idx = np.where(tgtM_repeat.detach().cpu().numpy() == 1)
+            batch_tgth_obj = torch.tensor(
                 [
+                    # tgtM_idx[0] == obj はある1つのインスタンスに注目してる(bs*max_num_instsにFlattenしてるからこうするしかない)
+                    # tgtM_idx[2]はマスクのy方向のインデックス
                     tgtM_idx[2][tgtM_idx[0] == obj].max() - tgtM_idx[2][tgtM_idx[0] == obj].min()
                     if (tgtM_idx[0] == obj).sum() != 0
                     else 0
-                    for obj in range(tgtM_rep.size(0))
+                    for obj in range(tgtM_repeat.size(0))
+                ]
+            ).type_as(tgtD)
+
+            batch_tgt_val = (batch_tgtD_obj > 0) * (batch_tgth_obj > 0)
+            batch_tgt_fy = fy_repeat[batch_tgt_val]
+            batch_tgtD_obj = batch_tgtD_obj[batch_tgt_val]
+            batch_tgth_obj = batch_tgth_obj[batch_tgt_val]
+            batch_tgt_labels = batch_tgt_labels.view(-1)[batch_tgt_val].long()
+            # batch_tgt_labelsの中に-1(backgroundカテゴリー)が排除できているのか確認
+            # assert -1 not in batch_tgt_labels
+
+            batch_tgtH_priors = height_priors[batch_tgt_labels, :]  # [len(labels),2]
+            batch_tgtH_obj = batch_tgth_obj * batch_tgtD_obj / batch_tgt_fy
+
+            # loss_tgt = torch.abs((batch_tgtD_obj - batch_tgtD_approx) / batch_tgtD_avg).sum() / batch_size
+            # batch_tgt_valが全てFalse（インスタンスが見つからなかった）のとき，
+
+            # assert batch_tgt_expects.shape == batch_tgtD_obj.shape
+
+            # FIXME: 306iteration目のこのforループの2ループ目に入ると，GPUに乗っているやつらどれにアクセスしてもRuntimeError: CUDA error: device-side assert triggeredが出る．
+            # なので，OneFormerの推定結果がおかしいとかではない．でも絶対ここで起こるのは意味が分からん．
+            # TODO: 306iteration目のOneFormerの推定結果が破損してる？shuffleをオフにしたDebugスクリプトを作成して，原因となっているオブジェクトを特定する（num_workersは増やす）
+
+            # gaussian_nll_lossでinputがベクトルの時，それらが同時確率を考えてしまっていないか->これは大丈夫そう
+            loss_tgt = (
+                F.gaussian_nll_loss(
+                    input=batch_tgtH_priors[:, 0], target=batch_tgtH_obj, var=batch_tgtH_priors[:, 1], eps=0.001
+                )
+                / bs
+            )
+
+            ### ref-frame ###
+            refD_repeat = batch_refD.repeat_interleave(max_num_insts, dim=0)
+            # batch_refD_avg = refD_rep.mean(dim=[1, 2, 3])
+            refM_repeat = batch_refM[:, 1:].reshape(-1, 1, hh, ww)
+            batch_refD_obj = (refD_repeat * refM_repeat).sum(dim=[1, 2, 3]) / refM_repeat.sum(dim=[1, 2, 3]).clamp(
+                min=1e-9
+            )
+            refM_idx = np.where(refM_repeat.detach().cpu().numpy() == 1)
+            batch_refh_obj = torch.tensor(
+                [
+                    refM_idx[2][refM_idx[0] == obj].max() - refM_idx[2][refM_idx[0] == obj].min()
+                    if (refM_idx[0] == obj).sum() != 0
+                    else 0
+                    for obj in range(refM_repeat.size(0))
+                ]
+            ).type_as(batch_refD)
+            batch_ref_val = (batch_refD_obj > 0) * (batch_refh_obj > 0)
+            batch_ref_fy = fy_repeat[batch_ref_val]
+            batch_refD_obj = batch_refD_obj[batch_ref_val]
+            batch_refh_obj = batch_refh_obj[batch_ref_val]
+            batch_ref_labels = batch_ref_labels.view(-1)[batch_ref_val].long()
+            # batch_tgt_labelsの中に-1(matchなしカテゴリー)が排除できているのか確認
+            # assert -1 not in batch_ref_labels
+            batch_refH_priors = height_priors[batch_ref_labels, :]  # [len(labels),2]
+            batch_refH_obj = batch_refh_obj * batch_refD_obj / batch_ref_fy
+
+            loss_ref = (
+                F.gaussian_nll_loss(
+                    input=batch_refH_priors[:, 0], target=batch_refH_obj, var=batch_refH_priors[:, 1], eps=0.001
+                )
+                / bs
+            )
+            loss += (loss_tgt + loss_ref) / 2
+    return loss
+
+
+def compute_obj_category_size_constraint_loss_old(
+    height_priors,
+    tgtD,
+    seq_tgtMs,
+    seq_tgt_labels,
+    seq_refDs,
+    seq_refMs,
+    seq_ref_labels,
+    batch_intrinsics,
+    max_num_insts,
+    seq_num_insts,
+    num_iter,
+):
+    """
+    Reference: Struct2Depth (AAAI'19), https://github.com/tensorflow/models/blob/archive/research/struct2depth/model.py
+    args:
+        D_avg, D_obj, H_obj, D_app: tensor([d1, d2, d3, ... dn], device='cuda:0')
+        num_inst: [n1, n2, ...]
+        intrinsics.shape: torch.Size([B, 3, 3])
+    """
+    bs, _, hh, ww = tgtD.size()
+
+    loss = torch.tensor(0.0).cuda()
+
+    for batch_tgtM, batch_tgt_labels, batch_refD, batch_refM, batch_ref_labels, batch_num_inst in zip(
+        seq_tgtMs, seq_tgt_labels, seq_refDs, seq_refMs, seq_ref_labels, seq_num_insts
+    ):
+        # batch_tgtM: [bs,max_num_insts+1,h,w]
+        # batch_tgt_labels: [bs, max_num_insts]
+        # batch_refD: [bs,1,h,w]
+        # batch_ref_labels: [bs, max_num_insts]
+        # len(batch_num_inst) == bs
+
+        if sum(batch_num_inst) != 0:
+            fy_repeat = batch_intrinsics[:, 1, 1].repeat_interleave(max_num_insts, dim=0)
+
+            ### tgt-frame ###
+            tgtD_repeat = tgtD.repeat_interleave(max_num_insts, dim=0)  # [bs * max_num_insts,1,h,w]
+            # num_matchの行列をスキップ
+            tgtM_repeat = batch_tgtM[:, 1:].reshape(-1, 1, hh, ww)  # [bs * max_num_insts,1,h,w]
+            batch_tgtD_obj = (tgtD_repeat * tgtM_repeat).sum(dim=[1, 2, 3]) / tgtM_repeat.sum(dim=[1, 2, 3]).clamp(
+                min=1e-9
+            )
+            tgtM_idx = np.where(tgtM_repeat.detach().cpu().numpy() == 1)
+            batch_tgtH_obj = torch.tensor(
+                [
+                    # tgtM_idx[0] == obj はある1つのインスタンスに注目してる(bs*max_num_instsにFlattenしてるからこうするしかない)
+                    # tgtM_idx[2]はマスクのy方向のインデックス
+                    tgtM_idx[2][tgtM_idx[0] == obj].max() - tgtM_idx[2][tgtM_idx[0] == obj].min()
+                    if (tgtM_idx[0] == obj).sum() != 0
+                    else 0
+                    for obj in range(tgtM_repeat.size(0))
                 ]
             ).type_as(tgtD)
 
             batch_tgt_val = (batch_tgtD_obj > 0) * (batch_tgtH_obj > 0)
-
-            batch_tgt_fy = fy_rep[batch_tgt_val]
-            batch_tgtD_avg = batch_tgtD_avg[
-                batch_tgt_val
-            ].detach()  # d_avg.detach() to prevent increasing depth in the sky.
+            batch_tgt_fy = fy_repeat[batch_tgt_val]
             batch_tgtD_obj = batch_tgtD_obj[batch_tgt_val]
             batch_tgtH_obj = batch_tgtH_obj[batch_tgt_val]
-            batch_tgt_labels = batch_tgt_labels[batch_tgt_val]
-            # TODO: batch_tgt_labelsの中に-1(matchなしカテゴリー)が排除できているのか確認
-            batch_tgtD_approx = (batch_tgt_fy * height_priors[batch_tgt_labels]) / batch_tgtH_obj
+            batch_tgt_labels = batch_tgt_labels.view(-1)[batch_tgt_val].long()
+            # batch_tgt_labelsの中に-1(backgroundカテゴリー)が排除できているのか確認
+            # assert -1 not in batch_tgt_labels
+            batch_tgt_priors = height_priors[batch_tgt_labels, :]  # [len(labels),2]
+            batch_tgt_expects = batch_tgt_fy * batch_tgt_priors[:, 0] / batch_tgtH_obj
+            batch_tgt_variances = (batch_tgt_fy / batch_tgtH_obj) ** 2 * batch_tgt_priors[:, 1]
 
             # loss_tgt = torch.abs((batch_tgtD_obj - batch_tgtD_approx) / batch_tgtD_avg).sum() / batch_size
+            # batch_tgt_valが全てFalse（インスタンスが見つからなかった）のとき，
+
+            # assert batch_tgt_expects.shape == batch_tgtD_obj.shape
+
+            # FIXME: 306iteration目のこのforループの2ループ目に入ると，GPUに乗っているやつらどれにアクセスしてもRuntimeError: CUDA error: device-side assert triggeredが出る．
+            # なので，OneFormerの推定結果がおかしいとかではない．でも絶対ここで起こるのは意味が分からん．
+            # TODO: 306iteration目のOneFormerの推定結果が破損してる？shuffleをオフにしたDebugスクリプトを作成して，原因となっているオブジェクトを特定する（num_workersは増やす）
+
+            # TODO: 分散がバカでかくなってるので，推定したDepthをheightに戻して，height領域のがうぶ分布による誤差を見る
+
+            # gaussian_nll_lossでinputがベクトルの時，それらが同時確率を考えてしまっていないか->これは大丈夫そう
+            # if num_iter >= 306:
+            # breakpoint()
             loss_tgt = (
-                F.gaussian_nll_loss(input=batch_tgtD_approx, target=batch_tgtD_obj, var=height_var_priors, eps=0.001)
-                / batch_size
+                F.gaussian_nll_loss(input=batch_tgt_expects, target=batch_tgtD_obj, var=batch_tgt_variances, eps=0.001)
+                / bs
             )
 
             ### ref-frame ###
-            refD_rep = batch_refD.repeat_interleave(max_num_insts, dim=0)
-            batch_refD_avg = refD_rep.mean(dim=[1, 2, 3])
-            refM_rep = batch_refM[:, 1:].reshape(-1, 1, hh, ww)
-            batch_refD_obj = (refD_rep * refM_rep).sum(dim=[1, 2, 3]) / refM_rep.sum(dim=[1, 2, 3]).clamp(min=1e-9)
-            refM_idx = np.where(refM_rep.detach().cpu().numpy() == 1)
+            refD_repeat = batch_refD.repeat_interleave(max_num_insts, dim=0)
+            # batch_refD_avg = refD_rep.mean(dim=[1, 2, 3])
+            refM_repeat = batch_refM[:, 1:].reshape(-1, 1, hh, ww)
+            batch_refD_obj = (refD_repeat * refM_repeat).sum(dim=[1, 2, 3]) / refM_repeat.sum(dim=[1, 2, 3]).clamp(
+                min=1e-9
+            )
+            refM_idx = np.where(refM_repeat.detach().cpu().numpy() == 1)
             batch_refH_obj = torch.tensor(
                 [
                     refM_idx[2][refM_idx[0] == obj].max() - refM_idx[2][refM_idx[0] == obj].min()
                     if (refM_idx[0] == obj).sum() != 0
                     else 0
-                    for obj in range(refM_rep.size(0))
+                    for obj in range(refM_repeat.size(0))
                 ]
             ).type_as(batch_refD)
             batch_ref_val = (batch_refD_obj > 0) * (batch_refH_obj > 0)
-            batch_ref_fy = fy_rep[batch_ref_val]
-            batch_refD_avg = batch_refD_avg[
-                batch_ref_val
-            ].detach()  # d_avg.detach() to prevent increasing depth in the sky.
+            batch_ref_fy = fy_repeat[batch_ref_val]
             batch_refD_obj = batch_refD_obj[batch_ref_val]
             batch_refH_obj = batch_refH_obj[batch_ref_val]
-            batch_ref_labels = batch_ref_labels[batch_ref_val]
-            # TODO: 上記と同様
+            batch_ref_labels = batch_ref_labels.view(-1)[batch_ref_val].long()
+            # batch_tgt_labelsの中に-1(matchなしカテゴリー)が排除できているのか確認
+            # assert -1 not in batch_ref_labels
             # batch_refD_approx = (batch_ref_fy * height_priors[batch_ref_labels]) / batch_refH_obj
-            batch_refD_approx = (
-                F.gaussian_nll_loss(input=batch_refD_approx, target=batch_refD_obj, var=height_var_priors, eps=0.001)
-                / batch_size
+            batch_ref_priors = height_priors[batch_ref_labels, :]  # [len(labels),2]
+            batch_ref_expects = batch_ref_fy * batch_ref_priors[:, 0] / batch_refH_obj
+            batch_ref_variances = (batch_ref_fy / batch_refH_obj) ** 2 * batch_ref_priors[:, 1]
+
+            # loss_ref = torch.abs((batch_refD_obj - batch_refD_approx) / batch_refD_avg).sum() / batch_size
+            assert batch_ref_expects.shape == batch_refD_obj.shape
+            loss_ref = (
+                F.gaussian_nll_loss(input=batch_ref_expects, target=batch_refD_obj, var=batch_ref_variances, eps=0.001)
+                / bs
             )
 
-            loss_ref = torch.abs((batch_refD_obj - batch_refD_approx) / batch_refD_avg).sum() / batch_size
             loss += (loss_tgt + loss_ref) / 2
+
     return loss
 
 
@@ -353,26 +499,26 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
 
     for tgtM, refD, refM, num_inst in zip(tgtMs, refDs, refMs, num_insts):
         if sum(num_inst) != 0:
-            fy_rep = intrinsics[:, 1, 1].repeat_interleave(max_num_insts, dim=0)
+            fy_repeat = intrinsics[:, 1, 1].repeat_interleave(max_num_insts, dim=0)
 
             ### tgt-frame ###
-            tgtD_rep = tgtD.repeat_interleave(max_num_insts, dim=0)
-            tgtD_avg = tgtD_rep.mean(dim=[1, 2, 3])
-            tgtM_rep = tgtM[:, 1:].reshape(-1, 1, hh, ww)
-            tgtD_obj = (tgtD_rep * tgtM_rep).sum(dim=[1, 2, 3]) / tgtM_rep.sum(dim=[1, 2, 3]).clamp(min=1e-9)
-            tgtM_idx = np.where(tgtM_rep.detach().cpu().numpy() == 1)
+            tgtD_repeat = tgtD.repeat_interleave(max_num_insts, dim=0)
+            tgtD_avg = tgtD_repeat.mean(dim=[1, 2, 3])
+            tgtM_repeat = tgtM[:, 1:].reshape(-1, 1, hh, ww)
+            tgtD_obj = (tgtD_repeat * tgtM_repeat).sum(dim=[1, 2, 3]) / tgtM_repeat.sum(dim=[1, 2, 3]).clamp(min=1e-9)
+            tgtM_idx = np.where(tgtM_repeat.detach().cpu().numpy() == 1)
             tgtH_obj = torch.tensor(
                 [
                     tgtM_idx[2][tgtM_idx[0] == obj].max() - tgtM_idx[2][tgtM_idx[0] == obj].min()
                     if (tgtM_idx[0] == obj).sum() != 0
                     else 0
-                    for obj in range(tgtM_rep.size(0))
+                    for obj in range(tgtM_repeat.size(0))
                 ]
             ).type_as(tgtD)
 
             tgt_val = (tgtD_obj > 0) * (tgtH_obj > 0)
 
-            tgt_fy = fy_rep[tgt_val]
+            tgt_fy = fy_repeat[tgt_val]
             tgtD_avg = tgtD_avg[tgt_val].detach()  # d_avg.detach() to prevent increasing depth in the sky.
             tgtD_obj = tgtD_obj[tgt_val]
             tgtH_obj = tgtH_obj[tgt_val]
@@ -383,23 +529,23 @@ def compute_obj_size_constraint_loss(height_prior, tgtD, tgtMs, refDs, refMs, in
             ).size(0)
 
             ### ref-frame ###
-            refD_rep = refD.repeat_interleave(max_num_insts, dim=0)
-            refD_avg = refD_rep.mean(dim=[1, 2, 3])
-            refM_rep = refM[:, 1:].reshape(-1, 1, hh, ww)
-            refD_obj = (refD_rep * refM_rep).sum(dim=[1, 2, 3]) / refM_rep.sum(dim=[1, 2, 3]).clamp(min=1e-9)
-            refM_idx = np.where(refM_rep.detach().cpu().numpy() == 1)
+            refD_repeat = refD.repeat_interleave(max_num_insts, dim=0)
+            refD_avg = refD_repeat.mean(dim=[1, 2, 3])
+            refM_repeat = refM[:, 1:].reshape(-1, 1, hh, ww)
+            refD_obj = (refD_repeat * refM_repeat).sum(dim=[1, 2, 3]) / refM_repeat.sum(dim=[1, 2, 3]).clamp(min=1e-9)
+            refM_idx = np.where(refM_repeat.detach().cpu().numpy() == 1)
             refH_obj = torch.tensor(
                 [
                     refM_idx[2][refM_idx[0] == obj].max() - refM_idx[2][refM_idx[0] == obj].min()
                     if (refM_idx[0] == obj).sum() != 0
                     else 0
-                    for obj in range(refM_rep.size(0))
+                    for obj in range(refM_repeat.size(0))
                 ]
             ).type_as(refD)
 
             ref_val = (refD_obj > 0) * (refH_obj > 0)
 
-            ref_fy = fy_rep[ref_val]
+            ref_fy = fy_repeat[ref_val]
             refD_avg = refD_avg[ref_val].detach()  # d_avg.detach() to prevent increasing depth in the sky.
             refD_obj = refD_obj[ref_val]
             refH_obj = refH_obj[ref_val]
@@ -515,7 +661,7 @@ def mean_on_mask(diff, valid_mask):
 
 
 @torch.no_grad()
-def compute_errors(gt, pred, med_scale=None):
+def compute_errors_without_scaling(gt, pred):
     abs_diff, abs_rel, sq_rel, a1, a2, a3 = 0, 0, 0, 0, 0, 0
     batch_size = gt.size(0)
     """
@@ -536,11 +682,6 @@ def compute_errors(gt, pred, med_scale=None):
         valid_gt = current_gt[valid]
         valid_pred = current_pred[valid].clamp(1e-3, max_depth)
 
-        if med_scale is None:
-            med_scale = torch.median(valid_gt) / torch.median(valid_pred)
-
-        valid_pred = valid_pred * med_scale
-
         thresh = torch.max((valid_gt / valid_pred), (valid_pred / valid_gt))
         a1 += (thresh < 1.25).float().mean()
         a2 += (thresh < 1.25**2).float().mean()
@@ -551,4 +692,44 @@ def compute_errors(gt, pred, med_scale=None):
 
         sq_rel += torch.mean(((valid_gt - valid_pred) ** 2) / valid_gt)
 
-    return [metric.item() / batch_size for metric in [abs_diff, abs_rel, sq_rel, a1, a2, a3]], med_scale
+    return [metric.item() / batch_size for metric in [abs_diff, abs_rel, sq_rel, a1, a2, a3]]
+
+
+# @torch.no_grad()
+# def compute_errors_without_scaling(gt, pred, med_scale=None):
+#     abs_diff, abs_rel, sq_rel, a1, a2, a3 = 0, 0, 0, 0, 0, 0
+#     batch_size = gt.size(0)
+#     """
+#         crop used by Garg ECCV16 to reproduce Eigen NIPS14 results
+#         construct a mask of False values, with the same size as target
+#         and then set to True values inside the crop
+#     """
+#     crop_mask = gt[0] != gt[0]
+#     y1, y2 = int(0.40810811 * gt.size(1)), int(0.99189189 * gt.size(1))
+#     x1, x2 = int(0.03594771 * gt.size(2)), int(0.96405229 * gt.size(2))
+#     crop_mask[y1:y2, x1:x2] = 1
+#     max_depth = 80
+
+#     for current_gt, current_pred in zip(gt, pred):
+#         valid = (current_gt > 0) & (current_gt < max_depth)
+#         valid = valid & crop_mask
+
+#         valid_gt = current_gt[valid]
+#         valid_pred = current_pred[valid].clamp(1e-3, max_depth)
+
+#         if med_scale is None:
+#             med_scale = torch.median(valid_gt) / torch.median(valid_pred)
+
+#         valid_pred = valid_pred * med_scale
+
+#         thresh = torch.max((valid_gt / valid_pred), (valid_pred / valid_gt))
+#         a1 += (thresh < 1.25).float().mean()
+#         a2 += (thresh < 1.25**2).float().mean()
+#         a3 += (thresh < 1.25**3).float().mean()
+
+#         abs_diff += torch.mean(torch.abs(valid_gt - valid_pred))
+#         abs_rel += torch.mean(torch.abs(valid_gt - valid_pred) / valid_gt)
+
+#         sq_rel += torch.mean(((valid_gt - valid_pred) ** 2) / valid_gt)
+
+#     return [metric.item() / batch_size for metric in [abs_diff, abs_rel, sq_rel, a1, a2, a3]], med_scale

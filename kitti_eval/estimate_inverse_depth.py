@@ -15,15 +15,14 @@ parser = argparse.ArgumentParser(
     description="Script for DispNet testing with corresponding groundTruth",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-parser.add_argument("--data_dir", default=None, required=True, type=Path, help="path to dataset")
+parser.add_argument("--root-image-dir", default=None, required=True, type=Path, help="path to dataset")
 parser.add_argument(
-    "--output_dir",
+    "--root-save-dir",
     default=None,
     required=True,
     type=Path,
     help="Output directory for saving predictions in a big 3D numpy file",
 )
-parser.add_argument("--dataset-list", default=None, type=str, help="Dataset list file")
 parser.add_argument("--pretrained-dispnet", required=True, type=str, help="pretrained DispNet path")
 parser.add_argument("--img-height", default=256, type=int, help="Image height")
 parser.add_argument("--img-width", default=832, type=int, help="Image width")
@@ -33,14 +32,14 @@ parser.add_argument("--save-in-local", action="store_true")
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
-def load_tensor_image(filename, args):
+def load_tensor_image(filename: Path, args: argparse.Namespace):
     img = imread(filename).astype(np.float32)
     h, w, _ = img.shape
     if (not args.no_resize) and (h != args.img_height or w != args.img_width):
         img = imresize(img, (args.img_height, args.img_width)).astype(np.float32)
     img = np.transpose(img, (2, 0, 1))
     tensor_img = ((torch.from_numpy(img).unsqueeze(0) / 255 - 0.5) / 0.5).to(device)
-    return tensor_img, img
+    return tensor_img
 
 
 @torch.no_grad()
@@ -57,38 +56,26 @@ def main():
     disp_net.load_state_dict(disp_weights["state_dict"])
     disp_net.eval()
 
-    data_dir = args.data_dir
-    with open(args.dataset_list, "r") as f:
-        test_files = list(f.read().splitlines())
-    print("=> {} files to test".format(len(test_files)))
-
-    output_dir: Path = args.output_dir
+    root_image_dir: Path = args.root_image_dir
+    root_save_dir: Path = args.root_save_dir
     if args.save_in_local:
-        output_dir = Path(str(output_dir).replace("dugong/", ""))
+        root_save_dir = Path(str(root_save_dir).replace("dugong/", ""))
+    root_save_dir.mkdir(parents=True, exist_ok=True)
 
-    for i in tqdm(range(len(test_files))):
-        tgt_img, ori_img = load_tensor_image(data_dir / test_files[i], args)
-        # tgt_img = load_tensor_image(data_dir / test_files[i], args)
-        pred_disp = disp_net(tgt_img).cpu().numpy()[0, 0]
-
-        save_path = output_dir / test_files[i].replace("/data", "")
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        fig = plt.figure()
-        fig.add_subplot(2, 1, 1)
-        plt.imshow(ori_img.transpose(1, 2, 0) / 255, vmin=0, vmax=1, cmap="plasma"), plt.grid(
-            linestyle=":", linewidth=0.4
-        )
-        fig.add_subplot(2, 1, 2)
-        plt.imshow(pred_disp, cmap="plasma"), plt.grid(linestyle=":", linewidth=0.4)
-        fig.tight_layout()
-        # plt.show()
-        plt.savefig(save_path)
-
-    #     if i == 0:
-    #         disp_predictions = np.zeros((len(test_files), *pred_disp.shape))
-    #     disp_predictions[i] = 1 / pred_disp
-    # np.save(output_dir / "disp_predictions.npy", disp_predictions)
+    for scene_dir in tqdm(root_image_dir.iterdir()):
+        save_dir = root_save_dir / scene_dir.name
+        save_dir.mkdir(parents=False, exist_ok=True)
+        for filepath in tqdm(scene_dir.glob("*.jpg")):
+            tgt_img = load_tensor_image(filepath, args)
+            pred_disp = disp_net(tgt_img).cpu().numpy()[0, 0]
+            save_img_path = root_save_dir / scene_dir.name / f"{filepath.stem}.jpg"
+            save_depth_path = root_save_dir / scene_dir.name / f"{filepath.stem}.npy"
+            plt.imshow(pred_disp, cmap="plasma"), plt.grid(linestyle=":", linewidth=0.4)
+            plt.tight_layout()
+            plt.axis("off")
+            # plt.show()
+            plt.savefig(save_img_path, bbox_inches="tight", pad_inches=0)
+            np.save(save_depth_path, pred_disp)
 
 
 if __name__ == "__main__":

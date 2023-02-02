@@ -28,25 +28,32 @@ import models
 from datasets.my_sequence_folders import SequenceFolderWithEgoPose
 from logger import AverageMeter, TermLogger
 from loss_functions import (
-    compute_errors,
+    compute_errors_without_scaling,
     compute_mof_consistency_loss,
     compute_obj_size_constraint_loss,
     compute_photo_and_geometry_loss,
     compute_smooth_loss,
+    ego_pose_loss,
 )
-from rigid_warp import forward_warp, mat2euler
+from rigid_warp import forward_warp
 from utils import save_checkpoint
 
 warnings.simplefilter("ignore", UserWarning)
 
+# 推論時はこのサイトの形式で出力するhttps://github.com/Huangying-Zhan/kitti-odom-eval
 
 parser = argparse.ArgumentParser(
     description="Learning Monocular Depth in Dynamic Scenes via Instance-Aware Projection Consistency (KITTI and CityScapes)",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument("data_dir", metavar="DIR", type=Path, help="path to dataset", default="")
+# parser.add_argument(
+#     "--with-gt",
+#     action="store_true",
+#     help="use ground truth for validation. You need to store it in npy 2D arrays see data/kitti_raw_loader.py for an example",
+# )
 parser.add_argument("--sequence-length", type=int, metavar="N", help="sequence length for training", default=3)
-parser.add_argument("-mni", type=int, help="maximum number of instances", default=3)
+parser.add_argument("-mni", type=int, help="maximum number of instances", default=20)
 parser.add_argument(
     "--rotation-mode",
     type=str,
@@ -63,6 +70,9 @@ parser.add_argument(
     " zeros will null gradients outside target image."
     " border will only null gradients of the coordinate outside (x or y)",
 )
+
+import os
+
 parser.add_argument(
     "-j", "--workers", default=os.cpu_count(), type=int, metavar="N", help="number of data loading workers"
 )
@@ -141,8 +151,7 @@ parser.add_argument(
 parser.add_argument(
     "-mc", "--mof-consistency-loss-weight", type=float, help="weight for mof consistency loss", metavar="W", default=0.1
 )
-parser.add_argument("--translation-weight", type=float, help="weight for translation loss", metavar="W", default=0.1)
-parser.add_argument("--rotation-weight", type=float, help="weight for rotation loss", metavar="W", default=1.0)
+parser.add_argument("--pose-weight", type=float, help="weight for ego pose loss", metavar="W", default=0.05)
 
 parser.add_argument("--with-auto-mask", action="store_true", help="with the the mask for stationary points")
 parser.add_argument("--with-ssim", action="store_true", help="with ssim or not")
@@ -193,6 +202,7 @@ def main():
 
     train_transform = custom_transforms.ComposeWithEgoPose(
         [
+            custom_transforms.RandomHorizontalFlipWithEgoPose(),
             custom_transforms.RandomScaleCropWithEgoPose(),
             custom_transforms.ArrayToTensorWithEgoPose(),
             normalize,
@@ -287,6 +297,7 @@ def main():
                 "depth_loss",
                 "translation_loss",
                 "rotation_loss",
+                "direction_loss",
                 "train_loss",
             ]
         )
@@ -315,7 +326,7 @@ def main():
         for error, name in zip(errors, error_names):
             tf_writer.add_scalar(name, error, epoch)
 
-        tf_writer.add_scalar("train loss per epoch", train_loss, epoch)
+        tf_writer.add_scalar("training loss", train_loss, epoch)
 
         # Up to you to chose the most relevant error to measure your model's performance, careful some measures are to maximize (such as a1,a2,a3)
         decisive_error = errors[1]  # "errors[1]" or "train_loss"
@@ -353,8 +364,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
 
     w1, w2, w3 = args.photo_loss_weight, args.geometry_consistency_weight, args.smooth_loss_weight
     w4, w5 = args.scale_loss_weight, args.mof_consistency_loss_weight
-    translation_weight = args.translation_weight
-    rotation_weight = args.rotation_weight
+    pose_weight = args.pose_weight
     # loss_1: photometric (eq.17)
     # loss_2: geometric (eq.18)
     # loss_3: smooth (eq.19)
@@ -363,6 +373,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     # loss_6: x
     # loss_7: x
 
+    # switch to train mode
     disp_net.train().to(device)
     ego_pose_net.train().to(device)
     obj_pose_net.train().to(device)
@@ -370,16 +381,12 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
     end = time.time()
     logger.train_bar.update(0)
 
-    for i, (
-        tgt_img,
-        ref_imgs,
-        intrinsics,
-        intrinsics_inv,
-        tgt_insts,
-        ref_insts,
-        gt_poses_t_1_to_t,
-        gt_poses_t_to_t_1,
-    ) in enumerate(train_loader):
+    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts, gt_rel_poses) in enumerate(
+        train_loader
+    ):
+        if args.debug_mode and i > 5:
+            break
+
         log_losses = i > 0 and n_iter % args.print_freq == 0
 
         ### inputs to GPU ###
@@ -392,8 +399,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         ref_insts = [
             ref_inst.to(device) for ref_inst in ref_insts
         ]  # ref_insts[i] == ref_imgs[i]とtgt_imgと比較したときにassociationできたref_imgs[i]内のインスタンスたち
-        gt_poses_t_1_to_t = [pose.to(device) for pose in gt_poses_t_1_to_t]
-        gt_poses_t_to_t_1 = [pose.to(device) for pose in gt_poses_t_to_t_1]
+        gt_rel_poses = [pose.to(device) for pose in gt_rel_poses]
 
         ### input instance masking ###
         tgt_bg_masks = [
@@ -415,17 +421,23 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
 
         ### compute depth & ego-motion ###
         tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
-        ego_poses_fwd, ego_poses_bwd, translation_loss, rotation_loss = compute_ego_pose_with_inv_and_loss(
-            ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_poses_t_1_to_t, gt_poses_t_to_t_1
+        (
+            ego_poses_fwd,
+            ego_poses_bwd,
+            translation_loss,
+            rotation_loss,
+            direction_loss,
+        ) = compute_ego_pose_with_inv_and_loss(
+            ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_rel_poses
         )  # [ 2 x ([B, 6]) ]
 
         ### Remove ego-motion effect: transformation with ego-motion ###
         ### NumRefs(2) >> Nx(C+mni)xHxW,  {t-1}->{t} | {t+1}->{t} ###
-        r2t_imgs_ego, r2t_insts_ego, _, r2t_vals_ego = compute_ego_warp(
+        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(
             ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics
         )
         ### NumRefs(2) >> Nx(C+mni)xHxW,  {t}->{t-1} | {t}->{t+1} ###
-        t2r_imgs_ego, t2r_insts_ego, _, t2r_vals_ego = compute_ego_warp(
+        t2r_imgs_ego, t2r_insts_ego, t2r_depths_ego, t2r_vals_ego = compute_ego_warp(
             [tgt_img, tgt_img], tgt_insts, [tgt_depth, tgt_depth], ego_poses_fwd, intrinsics
         )
 
@@ -518,14 +530,16 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         # 学習には使ってない．これもTensorboardで見たかっただけ？
         # loss_7 = ((1 / tgt_depth).mean() + sum([(1 / depth).mean() for depth in ref_depths])) / (1 + len(ref_depths))
 
+        # loss = w1 * loss_1 + w2 * loss_2 + w3 * loss_3 + w4 * loss_4 + w5 * loss_5 + w6 * loss_6 + w7 * loss_7 + ego_pose_loss
         loss = (
             w1 * loss_1
             + w2 * loss_2
             + w3 * loss_3
             + w4 * loss_4
             + w5 * loss_5
-            + translation_weight * translation_loss
-            + rotation_weight * rotation_loss
+            + pose_weight * translation_loss
+            + pose_weight * rotation_loss
+            + pose_weight * direction_loss
         )
         """
             loss_1.item(), loss_2.item(), loss_3.item(), loss_4.item(), loss_5.item()
@@ -544,6 +558,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
             # tf_writer.add_scalar("depth_loss", loss_7.item(), n_iter)
             tf_writer.add_scalar("train/translation_loss", translation_loss.item(), n_iter)
             tf_writer.add_scalar("train/rotation_loss", rotation_loss.item(), n_iter)
+            tf_writer.add_scalar("train/direction_loss", direction_loss.item(), n_iter)
 
         ### record loss ###
         losses.update(loss.item(), args.batch_size)
@@ -558,8 +573,17 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
         batch_time.update(time.time() - end)
         end = time.time()
 
+        ### fail-safe ###
+        # if np.isnan(loss.detach().cpu().numpy()):
+        #     pdb.set_trace()
+        # if np.isnan(height_prior.detach().cpu().numpy()):
+        #     pdb.set_trace()
+        # if np.isnan(tgt_depth.mean().detach().cpu().numpy()):
+        #     pdb.set_trace()
+
         with open(args.save_dir / args.log_full, "a") as csvfile:
             csv_full = csv.writer(csvfile, delimiter="\t")
+            # csv_full.writerow([loss_1.item(), loss_2.item(), loss_3.item(), loss_4.item(), loss_5.item(), loss_6.item(), loss_7.item(), loss.item()])
             csv_full.writerow(
                 [
                     loss_1.item(),
@@ -569,6 +593,7 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
                     loss_5.item(),
                     translation_loss.item(),
                     rotation_loss.item(),
+                    direction_loss.item(),
                     loss.item(),
                 ]
             )
@@ -577,26 +602,19 @@ def train(args, train_loader, disp_net, ego_pose_net, obj_pose_net, optimizer, e
             logger.train_writer.write("Train: Time {} Data {} Loss {}".format(batch_time, data_time, losses))
         if i >= epoch_size - 1:
             break
+
         n_iter += 1
+
     return losses.avg[0]
 
 
 @torch.no_grad()
 def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, logger):
     batch_time = AverageMeter()
-    error_names = [
-        "valid/total loss",
-        "valid/photo loss",
-        "valid/geometry loss",
-        "valid/smooth loss",
-        "valid/translation_loss",
-        "valid/rotation_loss",
-    ]
-    losses_meter = AverageMeter(n_meters=len(error_names), precision=4)
+    losses_meter = AverageMeter(n_meters=7, precision=4)
 
     w1, w2, w3 = args.photo_loss_weight, args.geometry_consistency_weight, args.smooth_loss_weight
-    translation_weight = args.translation_weight
-    rotation_weight = args.rotation_weight
+    pose_weight = args.pose_weight
 
     # switch to evaluation mode
     disp_net.eval()
@@ -606,16 +624,7 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
     end = time.time()
     logger.valid_bar.update(0)
 
-    for i, (
-        tgt_img,
-        ref_imgs,
-        intrinsics,
-        intrinsics_inv,
-        tgt_insts,
-        ref_insts,
-        gt_poses_t_1_to_t,
-        gt_poses_t_to_t_1,
-    ) in enumerate(val_loader):
+    for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, tgt_insts, ref_insts, gt_rel_poses) in enumerate(val_loader):
         if args.debug_mode and i > 5:
             break
 
@@ -626,8 +635,7 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
         intrinsics_inv = intrinsics_inv.to(device)
         tgt_insts = [img.to(device) for img in tgt_insts]
         ref_insts = [img.to(device) for img in ref_insts]
-        gt_poses_t_1_to_t = [pose.to(device) for pose in gt_poses_t_1_to_t]
-        gt_poses_t_to_t_1 = [pose.to(device) for pose in gt_poses_t_to_t_1]
+        gt_rel_poses = [pose.to(device) for pose in gt_rel_poses]
 
         ### input instance masking ###
         tgt_bg_masks = [1 - (img[:, 1:].sum(dim=1, keepdim=True) > 0).float() for img in tgt_insts]
@@ -645,15 +653,19 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
         ### compute depth & ego-motion ###
         tgt_depth, ref_depths = compute_depth(disp_net, tgt_img, ref_imgs)
         # ego_poses_fwd, ego_poses_bwd = compute_ego_pose_with_inv(ego_pose_net, tgt_bg_imgs, ref_bg_imgs)  # [ 2 x ([B, 6]) ]
-        ego_poses_fwd, ego_poses_bwd, translation_loss, rotation_loss = compute_ego_pose_with_inv_and_loss(
-            ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_poses_t_1_to_t, gt_poses_t_to_t_1
-        )
+        (
+            ego_poses_fwd,
+            ego_poses_bwd,
+            translation_loss,
+            rotation_loss,
+            direction_loss,
+        ) = compute_ego_pose_with_inv_and_loss(ego_pose_net, tgt_bg_imgs, ref_bg_imgs, gt_rel_poses)
 
         ### Remove ego-motion effect: transformation with ego-motion ###
-        r2t_imgs_ego, r2t_insts_ego, _, r2t_vals_ego = compute_ego_warp(
+        r2t_imgs_ego, r2t_insts_ego, r2t_depths_ego, r2t_vals_ego = compute_ego_warp(
             ref_imgs, ref_insts, ref_depths, ego_poses_bwd, intrinsics
         )
-        t2r_imgs_ego, t2r_insts_ego, _, t2r_vals_ego = compute_ego_warp(
+        t2r_imgs_ego, t2r_insts_ego, t2r_depths_ego, t2r_vals_ego = compute_ego_warp(
             [tgt_img, tgt_img], tgt_insts, [tgt_depth, tgt_depth], ego_poses_fwd, intrinsics
         )
 
@@ -706,15 +718,17 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
         loss_3 = loss_3.item()
         translation_loss = translation_loss.item()
         rotation_loss = rotation_loss.item()
+        direction_loss = direction_loss.item()
 
         loss = (
             w1 * loss_1
             + w2 * loss_2
             + w3 * loss_3
-            + translation_weight * translation_loss
-            + rotation_weight * rotation_loss
+            + pose_weight * translation_loss
+            + pose_weight * rotation_loss
+            + pose_weight * direction_loss
         )
-        losses_meter.update([loss, loss_1, loss_2, loss_3, translation_loss, rotation_loss])
+        losses_meter.update([loss, loss_1, loss_2, loss_3, translation_loss, rotation_loss, direction_loss])
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -724,7 +738,15 @@ def validate_with_pose_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net
             logger.valid_writer.write("valid: Time {} Loss {}".format(batch_time, losses_meter))
 
     logger.valid_bar.update(len(val_loader))
-    return losses_meter.avg, error_names
+    return losses_meter.avg, [
+        "valid/total loss",
+        "valid/photo loss",
+        "valid/geometry loss",
+        "valid/smooth loss",
+        "valid/translation_loss",
+        "valid/rotation_loss",
+        "valid/direction_loss",
+    ]
 
 
 @torch.no_grad()
@@ -876,12 +898,12 @@ def validate_with_gt(args, val_loader, disp_net, epoch, logger):
         output_disp = disp_net(tgt_img)
         output_depth = 1 / output_disp[:, 0]
 
-        error_all, med_scale = compute_errors(depth, output_depth)
+        error_all, med_scale = compute_errors_without_scaling(depth, output_depth)
         errors.update(error_all)
 
-        errors_bg.update(compute_errors(depth_bg, output_depth, med_scale)[0])
+        errors_bg.update(compute_errors_without_scaling(depth_bg, output_depth, med_scale)[0])
         if fg_ratio:
-            errors_fg.update(compute_errors(depth_fg, output_depth, med_scale)[0])
+            errors_fg.update(compute_errors_without_scaling(depth_fg, output_depth, med_scale)[0])
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -915,53 +937,47 @@ def compute_ego_pose_with_inv(pose_net, tgt_imgs, ref_imgs):
     for tgt_img, ref_img in zip(tgt_imgs, ref_imgs):
         poses_fwd.append(pose_net(tgt_img, ref_img))
         poses_bwd.append(pose_net(ref_img, tgt_img))
+
     return poses_fwd, poses_bwd
 
 
-def compute_ego_pose_with_inv_and_loss(
-    pose_net, tgt_imgs, ref_imgs, seq_poses_t_1_to_t: list[torch.Tensor], seq_poses_t_to_t_1: list[torch.Tensor]
-):
+def compute_ego_pose_with_inv_and_loss(pose_net, tgt_imgs, ref_imgs, seq_rel_poses):
     poses_fwd = []
     poses_bwd = []
-    total_trans_loss = torch.tensor(0.0).cuda()
-    total_rot_loss = torch.tensor(0.0).cuda()
-    for i, (tgt_img, ref_img, batch_poses_t_1_to_t, batch_poses_t_to_t_1) in enumerate(
-        zip(tgt_imgs, ref_imgs, seq_poses_t_1_to_t, seq_poses_t_to_t_1)
-    ):
-        if i == 0:
-            gt_fwd_trans_vecs = batch_poses_t_1_to_t[:, :, 3]
-            gt_fwd_rot_mats = batch_poses_t_1_to_t[:, :, :3]
-            gt_bwd_trans_vecs = batch_poses_t_to_t_1[:, :, 3]
-            gt_bwd_rot_mats = batch_poses_t_to_t_1[:, :, :3]
-        else:
-            gt_bwd_trans_vecs = batch_poses_t_1_to_t[:, :, 3]
-            gt_bwd_rot_mats = batch_poses_t_1_to_t[:, :, :3]
-            gt_fwd_trans_vecs = batch_poses_t_to_t_1[:, :, 3]
-            gt_fwd_rot_mats = batch_poses_t_to_t_1[:, :, :3]
-        # gt_bwd_trans_vecs = batch_poses_t_1_to_t[:, :, 3]
-        # gt_bwd_rot_mats = batch_poses_t_1_to_t[:, :, :3]
-        # gt_fwd_trans_vecs = batch_poses_t_to_t_1[:, :, 3]
-        # gt_fwd_rot_mats = batch_poses_t_to_t_1[:, :, :3]
+    translation_loss, rotation_loss, direction_loss = (
+        torch.tensor(0.0).cuda(),
+        torch.tensor(0.0).cuda(),
+        torch.tensor(0.0).cuda(),
+    )
+
+    # tgt_imgs: [(4,3,256,832), (4,3,256,832)]
+
+    for tgt_img, ref_img, batch_rel_poses in zip(tgt_imgs, ref_imgs, seq_rel_poses):
+        # gt_pose: [r11, r12, r13, t1, r21, r22, t2, r31, r32, r33, t3].view(3, 4)
+        gt_translation_vecs = batch_rel_poses[:, :, 3]
+        gt_rot_mats = batch_rel_poses[:, :, :3]
 
         fwd_pose = pose_net(tgt_img, ref_img)
         bwd_pose = pose_net(ref_img, tgt_img)
         poses_fwd.append(fwd_pose)
         poses_bwd.append(bwd_pose)
-        fwd_trans_loss, fwd_rot_loss = ego_pose_loss(fwd_pose, gt_fwd_rot_mats, gt_fwd_trans_vecs)
-        bwd_trans_loss, bwd_rot_loss = ego_pose_loss(bwd_pose, gt_bwd_rot_mats, gt_bwd_trans_vecs)
-        total_trans_loss = total_trans_loss + fwd_trans_loss + bwd_trans_loss
-        total_rot_loss = total_rot_loss + fwd_rot_loss + bwd_rot_loss
-    # print("")
-    return poses_fwd, poses_bwd, total_trans_loss, total_rot_loss
+        tmp_translation_loss, tmp_rotation_loss, tmp_direction_loss = ego_pose_loss(
+            fwd_pose, gt_rot_mats, gt_translation_vecs
+        )
+        translation_loss += tmp_translation_loss
+        rotation_loss += tmp_rotation_loss
+        direction_loss += tmp_direction_loss
 
+        ## -(R.T @ t).T == -t.T @ R, t.Tは横ベクトル
+        # pose_loss += ego_pose_loss(bwd_pose, gt_rot_mats.T, -gt_translation_vecs @ gt_rot_mats)
+        tmp_translation_loss, tmp_rotation_loss, tmp_direction_loss = ego_pose_loss(
+            bwd_pose, gt_rot_mats.transpose(1, 2), -gt_translation_vecs @ gt_rot_mats
+        )
+        translation_loss += tmp_translation_loss
+        rotation_loss += tmp_rotation_loss
+        direction_loss += tmp_direction_loss
 
-def ego_pose_loss(
-    batch_pred_pose: torch.Tensor, gt_rot_mats: torch.Tensor, gt_translation_vecs: torch.Tensor
-) -> tuple[torch.Tensor]:
-    # L2Norm
-    rotation_loss = torch.linalg.norm(batch_pred_pose[:, 3:] - mat2euler(gt_rot_mats), dim=1).mean()
-    translation_loss = torch.linalg.norm(batch_pred_pose[:, :3] - gt_translation_vecs, dim=1).mean()
-    return translation_loss, rotation_loss
+    return poses_fwd, poses_bwd, translation_loss, rotation_loss, direction_loss
 
 
 def compute_ego_warp(imgs, insts, depths, poses, intrinsics, is_detach=True):

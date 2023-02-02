@@ -34,22 +34,6 @@ def load_seg_and_category_as_tensor(path):
     return masks, labels
 
 
-# def load_seg_and_category_as_tensor(path):
-#     npz = np.load(path)
-#     masks = torch.from_numpy(npz["masks"].astype(np.float32))
-#     labels = torch.from_numpy(npz["labels"].astype(np.int32))
-#     # 背景を追加
-#     # maskがmaskが[[]]みたいなときに死ぬからハードコーディングしているけど修正する．
-#     if masks.squeeze().shape[0] == 0:
-#         masks = torch.zeros((1, 256, 832), dtype=torch.float32)
-#         labels = torch.tensor([-1], dtype=torch.int32)
-#     else:
-#         masks = torch.cat((torch.zeros_like(masks[0])[None, :, :], masks), dim=0)
-#         # 背景のカテゴリーIDは-1
-#         labels = torch.cat((torch.tensor([-1], dtype=torch.int32), labels))
-#     return masks, labels
-
-
 def L2_norm(x, dim=1, keepdim=True):
     curr_offset = 1e-10
     l2_norm = torch.norm(torch.abs(x) + curr_offset, dim=dim, keepdim=keepdim)
@@ -209,7 +193,7 @@ class SequenceFolder(data.Dataset):
             scene_img_dir = root_dir / "image" / scene_name
             scene_flof_dir = root_dir / "flow_f" / scene_name
             scene_flob_dir = root_dir / "flow_b" / scene_name
-            scene_segm_dir = root_dir / "segmentation_OneFormer_modified" / scene_name
+            scene_segm_dir = root_dir / "segmentation_OneFormer" / scene_name
             intrinsics = np.genfromtxt(scene_img_dir / "cam.txt").astype(np.float32).reshape(3, 3)
 
             img_paths = sorted(scene_img_dir.glob("*.jpg"))
@@ -361,6 +345,7 @@ class SequenceFolder(data.Dataset):
             ref_insts,
             tgt_insts_matched_labels,
             ref_insts_matched_labels,
+            [str(sample["tgt"])],
         )
 
     def __len__(self):

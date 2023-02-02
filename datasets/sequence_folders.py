@@ -14,8 +14,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.utils.data as data
-from flow_io import flow_read
 from imageio import imread
+
+from flow_io import flow_read
 from rigid_warp import flow_warp
 
 
@@ -258,6 +259,7 @@ class SequenceFolder(data.Dataset):
         for i in range(len(ref_imgs)):
             noc_f, noc_b = find_noc_masks(flow_fs[i].unsqueeze(0), flow_bs[i].unsqueeze(0))
 
+            # HACK: flow_warpと以下のunsqueezeは不要なので消す
             if i < len(ref_imgs) / 2:  # first half
                 seg0 = ref_segs[i].unsqueeze(0)
                 seg1 = tgt_seg.unsqueeze(0)
