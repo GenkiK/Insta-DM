@@ -28,13 +28,11 @@ import models
 from datasets.sequence_folders_with_category import SequenceFolder
 from datasets.validation_folders_with_category import ValidationSet
 from logger import AverageMeter, TermLogger
-from loss_functions import (
-    compute_errors_without_scaling,
-    compute_mof_consistency_loss,
-    compute_obj_category_size_constraint_loss,
-    compute_photo_and_geometry_loss,
-    compute_smooth_loss,
-)
+from loss_functions import (compute_errors_without_scaling,
+                            compute_mof_consistency_loss,
+                            compute_obj_category_size_constraint_loss,
+                            compute_photo_and_geometry_loss,
+                            compute_smooth_loss)
 from rigid_warp import forward_warp
 from utils import save_checkpoint
 
@@ -47,7 +45,7 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("data_dir", metavar="DIR", type=Path, help="path to dataset", default="")
 parser.add_argument("--sequence-length", type=int, metavar="N", help="sequence length for training", default=3)
-parser.add_argument("-mni", type=int, help="maximum number of instances", default=20)
+parser.add_argument("-mni", type=int, help="maximum number of instances")
 parser.add_argument(
     "--rotation-mode",
     type=str,
@@ -209,7 +207,7 @@ def main():
         is_train=True,
         seed=args.seed,
         shuffle=not (args.no_shuffle),
-        max_num_instances=args.mni,
+        max_n_inst=args.mni,
         transform=train_transform,
     )
 
@@ -464,7 +462,7 @@ def train(
         seq_tgt_obj_masks = [1 - mask for mask in seq_tgt_bg_masks]  # ここにもnum_matchの行列は含まれてる
         seq_ref_obj_masks = [1 - mask for mask in seq_ref_bg_masks]
         # ここでinstsの0番目の要素（num_match）が必要になる．
-        seq_batch_num_insts = [
+        seq_batch_n_insts = [
             batch_tgt_insts[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for batch_tgt_insts in seq_tgt_insts
         ]  # Number of instances for each sequence
 
@@ -495,9 +493,8 @@ def train(
             seq_ref_insts,
             t2r_imgs_ego,
             t2r_insts_ego,
-            batch_intrinsics,
             args.mni,
-            seq_batch_num_insts,
+            seq_batch_n_insts,
         )
 
         ### Compute composite motion field ###
@@ -545,10 +542,7 @@ def train(
         if w4 == 0:
             loss_4 = torch.tensor(0.0).cuda()
         else:
-            # TODO: おそらくこの中でカテゴリーごとにheight priorを分ける
-            # TODO: height_priorsのファイルを作成する
             # TODO: エラーの計算でスケール合わせみたいなことしてたらそれをやめる
-
             loss_4 = compute_obj_category_size_constraint_loss(
                 height_priors,
                 tgt_depth,
@@ -559,7 +553,7 @@ def train(
                 seq_ref_labels,
                 batch_intrinsics,
                 args.mni,
-                seq_batch_num_insts,
+                seq_batch_n_insts,
             )
 
         ### Compute unified motion consistency loss ###
@@ -665,7 +659,7 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
         ]
         tgt_obj_masks = [1 - mask for mask in tgt_bg_masks]
         ref_obj_masks = [1 - mask for mask in ref_bg_masks]
-        num_insts = [
+        n_insts = [
             tgt_inst[:, 0, 0, 0].int().detach().cpu().numpy().tolist() for tgt_inst in tgt_insts
         ]  # Number of instances for each sequence
 
@@ -694,9 +688,8 @@ def validate_without_gt(args, val_loader, disp_net, ego_pose_net, obj_pose_net, 
             ref_insts,
             t2r_imgs_ego,
             t2r_insts_ego,
-            intrinsics,
             args.mni,
-            num_insts,
+            n_insts,
         )
 
         ### Compute composite motion field ###
@@ -850,7 +843,7 @@ def compute_ego_warp(imgs, insts, depths, poses, intrinsics, is_detach=True):
 
 
 def compute_obj_pose_with_inv(
-    pose_net, tgtI, tgtMs, r2tIs, r2tMs, refIs, refMs, t2rIs, t2rMs, intrinsics, mni, num_insts
+    pose_net, tgtI, tgtMs, r2tIs, r2tMs, refIs, refMs, t2rIs, t2rMs, mni, num_insts
 ):
     """
     Args:

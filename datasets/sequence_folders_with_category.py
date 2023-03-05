@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import pickle
 import random
 from pathlib import Path
 from typing import Any
@@ -19,19 +20,24 @@ from flow_io import flow_read
 from rigid_warp import flow_warp
 
 
-def load_img_as_float(path):
+def load_img_as_float(path: Path):
     return imread(path).astype(np.float32)
 
 
-def load_flo_as_float(path):
+def load_flo_as_float(path: Path):
     return np.array(flow_read(path)).astype(np.float32)
 
 
-def load_seg_and_category_as_tensor(path):
+def load_seg_and_category_as_tensor(path: Path):
     npz = np.load(path)
     masks = torch.from_numpy(npz["masks"].astype(np.float32))
     labels = torch.from_numpy(npz["labels"].astype(np.int32))
     return masks, labels
+
+
+def load_invalid_idxs(path: Path) -> list[int]:
+    with open(path, "rb") as f:
+        return pickle.load(f)
 
 
 # def load_seg_and_category_as_tensor(path):
@@ -180,7 +186,7 @@ class SequenceFolder(data.Dataset):
         is_train: bool,
         seed: int | None = None,
         shuffle: bool = True,
-        max_num_instances: int = 20,
+        max_n_inst: int = 10,
         transform: Compose | None = None,
         proportion: int = 1,
         begin_idx: int = 0,
@@ -193,7 +199,7 @@ class SequenceFolder(data.Dataset):
         self.samples = SequenceFolder.make_samples(root_dir, scene_names, shuffle)
         split_index = int(math.floor(len(self.samples) * proportion))
         self.samples = self.samples[begin_idx:split_index]
-        self.mni = max_num_instances
+        self.mni = max_n_inst
         self.transform = transform
 
     @staticmethod
@@ -205,17 +211,19 @@ class SequenceFolder(data.Dataset):
     @staticmethod
     def make_samples(root_dir: Path, scene_names: list[str], shuffle: bool):
         samples: list[dir[str, Any]] = []
+        outlier_idxs_root_dir = root_dir / "outlier_indices"
         for scene_name in scene_names:
             scene_img_dir = root_dir / "image" / scene_name
             scene_flof_dir = root_dir / "flow_f" / scene_name
             scene_flob_dir = root_dir / "flow_b" / scene_name
-            scene_segm_dir = root_dir / "segmentation_OneFormer_modified" / scene_name
+            scene_segm_dir = root_dir / "segmentation_postprocess" / scene_name
             intrinsics = np.genfromtxt(scene_img_dir / "cam.txt").astype(np.float32).reshape(3, 3)
 
             img_paths = sorted(scene_img_dir.glob("*.jpg"))
             flof_paths = sorted(scene_flof_dir.glob("*.flo"))  # 00: src, 01: tgt
             flob_paths = sorted(scene_flob_dir.glob("*.flo"))  # 00: tgt, 01: src
             segm_paths = sorted(scene_segm_dir.glob("*.npz"))
+            outlier_idxs_paths = sorted(outlier_idxs_root_dir.glob(f"*/{scene_name}"))
 
             if len(img_paths) < 3:
                 continue
@@ -295,6 +303,9 @@ class SequenceFolder(data.Dataset):
             # warped_seg1_from_seg0, _ = flow_warp(seg0, flow_bs[i].unsqueeze(0))
 
             n_inst0 = seg0.shape[1]
+            # n_inst0 = min(seg0.shape[1], self.mni)
+            # n_inst1 = min(seg1.shape[1], self.mni)
+            # min_n_inst = min(n_inst0, n_inst1)
 
             # Warp seg0 to seg1. Find IoU between seg1w and seg1. Find the maximum corresponded instance in seg1.
             # たぶんch_01はseg0(ref)の各オブジェクトについて最大のIoUをとるseg1(tgt)のインスタンスのidxが並んでる
@@ -308,24 +319,24 @@ class SequenceFolder(data.Dataset):
             non_overlap_0 = torch.ones([seg0.shape[2], seg0.shape[3]])
             non_overlap_1 = torch.ones([seg0.shape[2], seg0.shape[3]])
 
-            num_match = 0
+            n_match = 0
             for ch in range(n_inst0):
                 condition1 = labels0[ch] == labels1[ch_01[ch]]
                 condition2 = (ch == ch_10[ch_01[ch]]) and (iou_01[ch] > 0.5) and (iou_10[ch_01[ch]] > 0.5)
                 condition3 = ((seg0[0, ch] * non_overlap_0).max() > 0) and (
                     (seg1[0, ch_01[ch]] * non_overlap_1).max() > 0
                 )
-                if condition1 and condition2 and condition3 and (num_match < self.mni):  # matching success!
-                    num_match += 1
+                if condition1 and condition2 and condition3 and (n_match < self.mni):  # matching success!
+                    n_match += 1
                     # マッチ数がインデックス＝どんどんassociationできたinstance(ch)をappendしていってるイメージ
-                    seg0_re[num_match] = seg0[0, ch] * non_overlap_0
-                    seg1_re[num_match] = seg1[0, ch_01[ch]] * non_overlap_1
-                    labels0_re[num_match - 1] = labels0[ch]
-                    labels1_re[num_match - 1] = labels0[ch]
-                    non_overlap_0 = non_overlap_0 * (1 - seg0_re[num_match])
-                    non_overlap_1 = non_overlap_1 * (1 - seg1_re[num_match])
-            seg0_re[0] = num_match
-            seg1_re[0] = num_match
+                    seg0_re[n_match] = seg0[0, ch] * non_overlap_0
+                    seg1_re[n_match] = seg1[0, ch_01[ch]] * non_overlap_1
+                    labels0_re[n_match - 1] = labels0[ch]
+                    labels1_re[n_match - 1] = labels0[ch]
+                    non_overlap_0 = non_overlap_0 * (1 - seg0_re[n_match])
+                    non_overlap_1 = non_overlap_1 * (1 - seg1_re[n_match])
+            seg0_re[0] = n_match
+            seg1_re[0] = n_match
 
             # この時点でlabelsにはbackgroundの要素が含まれていない
             if i < len(ref_imgs) / 2:  # first half
@@ -339,19 +350,20 @@ class SequenceFolder(data.Dataset):
                 tgt_insts_matched_labels.append(labels0_re)
                 ref_insts_matched_labels.append(labels1_re)
             # tgt_insts: [[ref_imgs[0]に対してassociationできたtgt内のインスタンス最大20個], [ref_imgs[1]...], ...]
-            # tgt_insts: list[torch.Size([H, W, max_num_insts])]
+            # tgt_insts: list[torch.Size([H, W, max_n_inst])]
             # ref_insts: [[ref_imgs[0]とtgtを見比べてassociationできたref_imgs[0]内のインスタンス最大20個], [ref_imgs[1]...], ...]
         intrinsics = np.copy(sample["intrinsics"])
         if self.transform is not None:
             imgs, segms, intrinsics = self.transform([tgt_img] + ref_imgs, tgt_insts + ref_insts, intrinsics)
             tgt_img = imgs[0]
             ref_imgs = imgs[1:]
-            tgt_insts = segms[: int(len(ref_imgs) / 2 + 1)]  # list[torch.Size([max_num_insts, H, W])]
+            tgt_insts = segms[: int(len(ref_imgs) / 2 + 1)]  # list[torch.Size([max_n_inst, H, W])]
             ref_insts = segms[int(len(ref_imgs) / 2 + 1) :]
 
         # While passing through RandomScaleCrop(), instances could be flied-out and become zero-mask. -> Need filtering!
         for sq in range(len(ref_imgs)):
             tgt_insts[sq], ref_insts[sq] = recursive_check_nonzero_inst(tgt_insts[sq], ref_insts[sq])
+
         return (
             tgt_img,
             ref_imgs,
@@ -365,3 +377,14 @@ class SequenceFolder(data.Dataset):
 
     def __len__(self):
         return len(self.samples)
+
+
+# if __name__ == "__main__":
+#     root_path = Path("/home/gkinoshita/humpback/workspace/Insta-DM/kitti_256/outlier_indices/")
+#     root_path = root_path.iterdir().__next__()
+#     for scene_path in root_path.iterdir():
+#         for i, idx_path in enumerate(scene_path.iterdir()):
+#             if i < 10:
+#                 print(load_invalid_idxs(idx_path))
+#             else:
+#                 exit()
