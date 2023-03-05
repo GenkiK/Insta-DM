@@ -28,16 +28,11 @@ def load_flo_as_float(path: Path):
     return np.array(flow_read(path)).astype(np.float32)
 
 
-def load_seg_and_category_as_tensor(path: Path):
+def load_segm_and_label_as_tensor(path: Path):
     npz = np.load(path)
-    masks = torch.from_numpy(npz["masks"].astype(np.float32))
-    labels = torch.from_numpy(npz["labels"].astype(np.int32))
-    return masks, labels
-
-
-def load_invalid_idxs(path: Path) -> list[int]:
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    segms = torch.from_numpy(npz["masks"].astype(np.float32))
+    categories = torch.from_numpy(npz["labels"].astype(np.int32))
+    return segms, categories
 
 
 # def load_seg_and_category_as_tensor(path):
@@ -211,7 +206,6 @@ class SequenceFolder(data.Dataset):
     @staticmethod
     def make_samples(root_dir: Path, scene_names: list[str], shuffle: bool):
         samples: list[dir[str, Any]] = []
-        outlier_idxs_root_dir = root_dir / "outlier_indices"
         for scene_name in scene_names:
             scene_img_dir = root_dir / "image" / scene_name
             scene_flof_dir = root_dir / "flow_f" / scene_name
@@ -223,7 +217,6 @@ class SequenceFolder(data.Dataset):
             flof_paths = sorted(scene_flof_dir.glob("*.flo"))  # 00: src, 01: tgt
             flob_paths = sorted(scene_flob_dir.glob("*.flo"))  # 00: tgt, 01: src
             segm_paths = sorted(scene_segm_dir.glob("*.npz"))
-            outlier_idxs_paths = sorted(outlier_idxs_root_dir.glob(f"*/{scene_name}"))
 
             if len(img_paths) < 3:
                 continue
@@ -257,11 +250,11 @@ class SequenceFolder(data.Dataset):
         flow_fs = [torch.from_numpy(load_flo_as_float(flow_f)) for flow_f in sample["flow_fs"]]
         flow_bs = [torch.from_numpy(load_flo_as_float(flow_b)) for flow_b in sample["flow_bs"]]
 
-        tgt_seg, tgt_inst_labels = load_seg_and_category_as_tensor(sample["tgt_seg"])
+        tgt_seg, tgt_inst_labels = load_segm_and_label_as_tensor(sample["tgt_seg"])
         # ref_segs, ref_insts_labels = [load_seg_and_category_as_tensor(path) for path in sample["ref_segs"]]
         ref_segs, ref_insts_labels = [], []
         for seg_path in sample["ref_segs"]:
-            ref_seg, ref_insts_label = load_seg_and_category_as_tensor(seg_path)
+            ref_seg, ref_insts_label = load_segm_and_label_as_tensor(seg_path)
             ref_segs.append(ref_seg)
             ref_insts_labels.append(ref_insts_label)
 
@@ -377,14 +370,3 @@ class SequenceFolder(data.Dataset):
 
     def __len__(self):
         return len(self.samples)
-
-
-# if __name__ == "__main__":
-#     root_path = Path("/home/gkinoshita/humpback/workspace/Insta-DM/kitti_256/outlier_indices/")
-#     root_path = root_path.iterdir().__next__()
-#     for scene_path in root_path.iterdir():
-#         for i, idx_path in enumerate(scene_path.iterdir()):
-#             if i < 10:
-#                 print(load_invalid_idxs(idx_path))
-#             else:
-#                 exit()
